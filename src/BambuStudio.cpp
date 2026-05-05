@@ -6145,9 +6145,8 @@ int CLI::run(int argc, char **argv)
             colors_out[color_idx] = { float(rgb_color[0]) / 255.f, float(rgb_color[1]) / 255.f, float(rgb_color[2]) / 255.f, float(rgb_color[3]) / 255.f };
         }
 
-        int gl_major, gl_minor, gl_verbos;
-        glfwGetVersion(&gl_major, &gl_minor, &gl_verbos);
-        BOOST_LOG_TRIVIAL(info) << boost::format("opengl version %1%.%2%.%3%")%gl_major %gl_minor %gl_verbos;
+        int gl_major = 3, gl_minor = 3;
+            BOOST_LOG_TRIVIAL(info) << boost::format("requesting opengl context %1%.%2%")%gl_major %gl_minor;
 
         glfwSetErrorCallback(glfw_callback);
         int ret = glfwInit();
@@ -6172,10 +6171,6 @@ int CLI::run(int argc, char **argv)
             glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #else
             glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
-#endif
-
-#ifdef __linux__
-            glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_OSMESA_CONTEXT_API);
 #endif
 
             GLFWwindow* window = glfwCreateWindow(640, 480, "base_window", NULL, NULL);
@@ -7497,9 +7492,8 @@ int CLI::run(int argc, char **argv)
                 colors_out[color_idx] = { float(rgb_color[0]) / 255.f, float(rgb_color[1]) / 255.f, float(rgb_color[2]) / 255.f, float(rgb_color[3]) / 255.f };
             }
 
-            int gl_major, gl_minor, gl_verbos;
-            glfwGetVersion(&gl_major, &gl_minor, &gl_verbos);
-            BOOST_LOG_TRIVIAL(info) << boost::format("opengl version %1%.%2%.%3%")%gl_major %gl_minor %gl_verbos;
+            int gl_major = 3, gl_minor = 3;
+        BOOST_LOG_TRIVIAL(info) << boost::format("requesting opengl context %1%.%2%")%gl_major %gl_minor;
 
             glfwSetErrorCallback(glfw_callback);
             int ret = glfwInit();
@@ -7523,10 +7517,6 @@ int CLI::run(int argc, char **argv)
                 glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #else
                 glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
-#endif
-
-#ifdef __linux__
-                glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_OSMESA_CONTEXT_API);
 #endif
 
                 GLFWwindow* window = glfwCreateWindow(640, 480, "base_window", NULL, NULL);
