@@ -8193,7 +8193,7 @@ void CLI::print_help(bool include_print_options, PrinterTechnology printer_techn
     boost::nowide::cout
         << SLIC3R_APP_KEY <<"-"<< SLIC3R_VERSION << ":"
         << std::endl
-        << "Usage: bambu-studio [ OPTIONS ] [ file.3mf/file.stl ... ]" << std::endl
+        << "Usage: bambu-studio [ OPTIONS ] [ file.3mf/file.stl/file.step ... ]" << std::endl
         << std::endl
         << "OPTIONS:" << std::endl;
     cli_misc_config_def.print_cli_help(boost::nowide::cout, false);

@@ -343,8 +343,22 @@ Model Model::read_from_file(const std::string&                                  
         delete_temp_file(temp_stl);
     }
 #endif
+    else if (boost::algorithm::iends_with(input_file, ".step") ||
+             boost::algorithm::iends_with(input_file, ".stp")) {
+        Step step_file(input_file);
+        auto status = step_file.load();
+        if (status == Step::Step_Status::LOAD_SUCCESS) {
+            bool cancel = false;
+            status = step_file.mesh(&model, cancel, false, 0.003, 0.5);
+        }
+        if (status == Step::Step_Status::LOAD_ERROR)
+            throw Slic3r::RuntimeError("Failed to load STEP file.");
+        else if (status == Step::Step_Status::MESH_ERROR)
+            throw Slic3r::RuntimeError("Failed to mesh STEP file or no valid geometry found.");
+        result = (status == Step::Step_Status::MESH_SUCCESS);
+    }
     else
-        throw Slic3r::RuntimeError(_L("Unknown file format. Input file must have .stl, .obj, .amf(.xml) extension."));
+        throw Slic3r::RuntimeError(_L("Unknown file format. Input file must have .stl, .obj, .step, .amf(.xml) or .3mf extension."));
 
     if (is_cb_cancel) {
         Model empty_model;
