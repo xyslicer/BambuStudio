@@ -207,6 +207,21 @@ typedef struct _sliced_info {
     int                 plate_count {0};
     int                 plate_to_slice {0};
 
+    // Mesh quality stats (aggregated across all objects)
+    struct mesh_stats_t {
+        int    open_edges {0};
+        int    number_of_parts {0};
+        int    number_of_facets {0};
+        float  volume {0.f};
+        bool   manifold {true};
+        // Repaired errors
+        int    degenerate_facets {0};
+        int    edges_fixed {0};
+        int    facets_removed {0};
+        int    facets_reversed {0};
+        int    backwards_edges {0};
+    } mesh_stats;
+
     std::vector<sliced_plate_info_t> sliced_plates;
     size_t prepare_time;
     size_t export_time;
@@ -571,6 +586,22 @@ void record_exit_reson(std::string outputdir, int code, int plate_id, std::strin
                 % filament_usage_g;
 
             j["sliced_plates"].push_back(std::move(plate_json));
+        }
+
+        // Mesh quality stats
+        {
+            json ms;
+            ms["open_edges"]        = sliced_info.mesh_stats.open_edges;
+            ms["number_of_parts"]   = sliced_info.mesh_stats.number_of_parts;
+            ms["number_of_facets"]  = sliced_info.mesh_stats.number_of_facets;
+            ms["volume"]            = sliced_info.mesh_stats.volume;
+            ms["manifold"]          = sliced_info.mesh_stats.manifold;
+            ms["degenerate_facets"] = sliced_info.mesh_stats.degenerate_facets;
+            ms["edges_fixed"]       = sliced_info.mesh_stats.edges_fixed;
+            ms["facets_removed"]    = sliced_info.mesh_stats.facets_removed;
+            ms["facets_reversed"]   = sliced_info.mesh_stats.facets_reversed;
+            ms["backwards_edges"]   = sliced_info.mesh_stats.backwards_edges;
+            j["mesh_stats"] = std::move(ms);
         }
 
         for (auto& iter: key_values)
@@ -2123,6 +2154,21 @@ int CLI::run(int argc, char **argv)
             if (model.objects.empty()) {
                 boost::nowide::cerr << "Error: file is empty: " << file << std::endl;
                 continue;
+            }
+            // Collect mesh quality stats from loaded model
+            for (const ModelObject* obj : model.objects) {
+                TriangleMeshStats stats = obj->get_object_stl_stats();
+                sliced_info.mesh_stats.open_edges        += stats.open_edges;
+                sliced_info.mesh_stats.number_of_parts   += stats.number_of_parts;
+                sliced_info.mesh_stats.number_of_facets  += stats.number_of_facets;
+                sliced_info.mesh_stats.volume            += stats.volume;
+                if (stats.open_edges > 0)
+                    sliced_info.mesh_stats.manifold = false;
+                sliced_info.mesh_stats.degenerate_facets += stats.repaired_errors.degenerate_facets;
+                sliced_info.mesh_stats.edges_fixed       += stats.repaired_errors.edges_fixed;
+                sliced_info.mesh_stats.facets_removed    += stats.repaired_errors.facets_removed;
+                sliced_info.mesh_stats.facets_reversed   += stats.repaired_errors.facets_reversed;
+                sliced_info.mesh_stats.backwards_edges   += stats.repaired_errors.backwards_edges;
             }
             m_models.push_back(std::move(model));
         }
