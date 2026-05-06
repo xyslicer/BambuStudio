@@ -3431,6 +3431,10 @@ int CLI::run(int argc, char **argv)
     new_printer_extruder_variants = m_print_config.option<ConfigOptionStrings>("printer_extruder_variant", true)->values;
     new_printer_variant_count = new_printer_extruder_variants.size();
     auto extruder_max_nozzle_count = m_print_config.option<ConfigOptionIntsNullable>("extruder_max_nozzle_count", true)->values;
+    // Ensure extruder_max_nozzle_count covers all extruders (may be undersized
+    // when switching from single to dual extruder)
+    if (static_cast<int>(extruder_max_nozzle_count.size()) < new_extruder_count)
+        extruder_max_nozzle_count.resize(new_extruder_count, 1);
     bool support_multi_nozzle = std::any_of(extruder_max_nozzle_count.begin(),extruder_max_nozzle_count.end(),[](int val){return val>1;});
 
     if(m_extra_config.has("nozzle_volume_type")) {
