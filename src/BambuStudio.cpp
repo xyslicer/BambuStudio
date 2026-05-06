@@ -3178,6 +3178,12 @@ int CLI::run(int argc, char **argv)
                     boost::nowide::cerr << __FUNCTION__<<":can not create option " <<opt_key<<" to full_config "<<std::endl;
                     return CLI_CONFIG_FILE_ERROR;
                 }
+                if (source_opt->type() != dest_opt->type()) {
+                    BOOST_LOG_TRIVIAL(error) << boost::format("[DEBUG] update_full_config: TYPE MISMATCH key=%1% src_type=%2% dst_type=%3%")
+                        %opt_key %(int)source_opt->type() %(int)dest_opt->type();
+                }
+                BOOST_LOG_TRIVIAL(trace) << boost::format("[DEBUG] update_full_config: set key=%1% type=%2%")
+                    %opt_key %(int)source_opt->type();
                 dest_opt->set(source_opt);
                 //*dest_opt = *source_opt;
             }
