@@ -8260,10 +8260,22 @@ std::vector<int> DynamicPrintConfig::update_values_to_printer_extruders(DynamicP
         auto opt_extruder_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("extruder_type"));
         auto opt_nozzle_volume_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("nozzle_volume_type"));
 
+        if (!opt_extruder_type || !opt_nozzle_volume_type) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", Line %1%: extruder_type or nozzle_volume_type not found/wrong type in printer_config (extruder_type=%2%, nozzle_volume_type=%3%)")
+                %__LINE__ %(void*)opt_extruder_type %(void*)opt_nozzle_volume_type;
+            // Fall back to defaults to avoid null deref
+            if (!opt_extruder_type)
+                BOOST_LOG_TRIVIAL(error) << "  extruder_type option ptr=" << (void*)printer_config.option("extruder_type")
+                    << " type=" << (printer_config.option("extruder_type") ? (int)printer_config.option("extruder_type")->type() : -1);
+            if (!opt_nozzle_volume_type)
+                BOOST_LOG_TRIVIAL(error) << "  nozzle_volume_type option ptr=" << (void*)printer_config.option("nozzle_volume_type")
+                    << " type=" << (printer_config.option("nozzle_volume_type") ? (int)printer_config.option("nozzle_volume_type")->type() : -1);
+        }
+
         if (extruder_id > 0 && extruder_id <= static_cast<unsigned> (extruder_count)) {
             variant_index.resize(1);
-            ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(extruder_id - 1));
-            NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(extruder_id - 1));
+            ExtruderType extruder_type = opt_extruder_type ? (ExtruderType)(opt_extruder_type->get_at(extruder_id - 1)) : etDirectDrive;
+            NozzleVolumeType nozzle_volume_type = opt_nozzle_volume_type ? (NozzleVolumeType)(opt_nozzle_volume_type->get_at(extruder_id - 1)) : nvtStandard;
 
             if (nozzle_volume_type == nvtHybrid) {
                 // use the one passed
@@ -8289,7 +8301,7 @@ std::vector<int> DynamicPrintConfig::update_values_to_printer_extruders(DynamicP
         else {
             if  (extruder_nozzle_volume_count > extruder_count){
                 variant_count = extruder_nozzle_volume_count;
-            } else
+            } else if (opt_nozzle_volume_type)
                 for (int e_index = 0; e_index < extruder_count; e_index++) {
                     NozzleVolumeType nozzle_volume_type = (NozzleVolumeType) (opt_nozzle_volume_type->get_at(e_index));
                     if (nozzle_volume_type == nvtHybrid) { variant_count = extruder_nozzle_volume_count; }
@@ -8299,8 +8311,8 @@ std::vector<int> DynamicPrintConfig::update_values_to_printer_extruders(DynamicP
             int v_index = 0;
             for (int e_index = 0; e_index < extruder_count; e_index++)
             {
-                ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(e_index));
-                NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(e_index));
+                ExtruderType extruder_type = opt_extruder_type ? (ExtruderType)(opt_extruder_type->get_at(e_index)) : etDirectDrive;
+                NozzleVolumeType nozzle_volume_type = opt_nozzle_volume_type ? (NozzleVolumeType)(opt_nozzle_volume_type->get_at(e_index)) : nvtStandard;
 
                 int nvt_count = 1;
                 if (extruder_nozzle_volume_count > extruder_count || nozzle_volume_type == nvtHybrid) {
