@@ -3461,6 +3461,14 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("%1%: nozzle_volume_type not found, use standard by default, new_printer_name %2% extruder_count %3%")%__LINE__ %new_printer_name %new_extruder_count;
         }
     }
+    // Ensure new_nozzle_volume_type covers all extruders — the CLI may pass
+    // fewer values than the printer has extruders, or the dynamic_cast above
+    // may fail silently, leaving the vector empty.
+    if (static_cast<int>(new_nozzle_volume_type.size()) < new_extruder_count) {
+        BOOST_LOG_TRIVIAL(info) << boost::format("[FIX] new_nozzle_volume_type size %1% < new_extruder_count %2%, padding with Standard")
+            %new_nozzle_volume_type.size() %new_extruder_count;
+        new_nozzle_volume_type.resize(new_extruder_count, nvtStandard);
+    }
     new_extruder_variants.resize(new_extruder_count, "");
     const ConfigOptionEnumsGeneric *opt_extruder_type = dynamic_cast<const ConfigOptionEnumsGeneric *>(m_print_config.option("extruder_type"));
     for (int e_index = 0; e_index < new_extruder_count; e_index++) {
