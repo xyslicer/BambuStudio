@@ -8476,6 +8476,15 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
         auto opt_extruder_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("extruder_type"));
         auto opt_nozzle_volume_type = dynamic_cast<const ConfigOptionEnumsGeneric*>(printer_config.option("nozzle_volume_type"));
 
+        if (!opt_extruder_type || !opt_nozzle_volume_type) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(", Line %1%: extruder_type or nozzle_volume_type not found/wrong type (extruder_type=%2%, nozzle_volume_type=%3%)")
+                %__LINE__ %(void*)opt_extruder_type %(void*)opt_nozzle_volume_type;
+            if (!opt_nozzle_volume_type) {
+                auto raw = printer_config.option("nozzle_volume_type");
+                BOOST_LOG_TRIVIAL(error) << "  raw nozzle_volume_type ptr=" << (void*)raw << " type=" << (raw ? (int)raw->type() : -1);
+            }
+        }
+
         auto opt_filament_volume_maps = dynamic_cast<const ConfigOptionInts*>(printer_config.option("filament_volume_map"));
         std::vector<int> filament_volume_maps;
         if (opt_filament_volume_maps)
@@ -8487,8 +8496,8 @@ void DynamicPrintConfig::update_values_to_printer_extruders_for_multiple_filamen
 
         for (int f_index = 0; f_index < filament_count; f_index++)
         {
-            ExtruderType extruder_type = (ExtruderType)(opt_extruder_type->get_at(filament_maps[f_index] - 1));
-            NozzleVolumeType nozzle_volume_type = (NozzleVolumeType)(opt_nozzle_volume_type->get_at(filament_maps[f_index] - 1));
+            ExtruderType extruder_type = opt_extruder_type ? (ExtruderType)(opt_extruder_type->get_at(filament_maps[f_index] - 1)) : etDirectDrive;
+            NozzleVolumeType nozzle_volume_type = opt_nozzle_volume_type ? (NozzleVolumeType)(opt_nozzle_volume_type->get_at(filament_maps[f_index] - 1)) : nvtStandard;
 
             if ((extruder_nozzle_volume_count > extruder_count || nozzle_volume_type == nvtHybrid) && (!filament_volume_maps.empty())) {
                 nozzle_volume_type = (NozzleVolumeType)(filament_volume_maps[f_index]);
@@ -8669,8 +8678,8 @@ void DynamicPrintConfig::update_filament_config_values_for_multiple_extruders(Dy
         std::vector<int> trim_param_indices;
         trim_param_indices.reserve(filament_count * 2);
         for (int f_index = 0; f_index < filament_count; f_index++) {
-            ExtruderType extruder_type = (ExtruderType) (opt_extruder_type->get_at(filament_maps[f_index] - 1));
-            NozzleVolumeType nozzle_volume_type = (NozzleVolumeType) (opt_nozzle_volume_type->get_at(filament_maps[f_index] - 1));
+            ExtruderType extruder_type = opt_extruder_type ? (ExtruderType) (opt_extruder_type->get_at(filament_maps[f_index] - 1)) : etDirectDrive;
+            NozzleVolumeType nozzle_volume_type = opt_nozzle_volume_type ? (NozzleVolumeType) (opt_nozzle_volume_type->get_at(filament_maps[f_index] - 1)) : nvtStandard;
             auto iter = filament_extruder_nozzle_infos.find(f_index);
             if (iter != filament_extruder_nozzle_infos.end()) {
                 std::vector<ExtruderNozleInfo> nozzle_infos = iter->second;
