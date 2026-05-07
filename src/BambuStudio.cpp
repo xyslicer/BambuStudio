@@ -3178,12 +3178,6 @@ int CLI::run(int argc, char **argv)
                     boost::nowide::cerr << __FUNCTION__<<":can not create option " <<opt_key<<" to full_config "<<std::endl;
                     return CLI_CONFIG_FILE_ERROR;
                 }
-                if (source_opt->type() != dest_opt->type()) {
-                    BOOST_LOG_TRIVIAL(error) << boost::format("[DEBUG] update_full_config: TYPE MISMATCH key=%1% src_type=%2% dst_type=%3%")
-                        %opt_key %(int)source_opt->type() %(int)dest_opt->type();
-                }
-                BOOST_LOG_TRIVIAL(trace) << boost::format("[DEBUG] update_full_config: set key=%1% type=%2%")
-                    %opt_key %(int)source_opt->type();
                 dest_opt->set(source_opt);
                 //*dest_opt = *source_opt;
             }
@@ -3227,8 +3221,6 @@ int CLI::run(int argc, char **argv)
         int ret;
 
         load_default_gcodes_to_config(load_machine_config, Preset::TYPE_PRINTER);
-        BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] machine update: new_printer_name='%1%', current_extruder_count=%2%, filament_count=%3%, variant_count_changed=%4%")
-            %new_printer_name %current_extruder_count %filament_count %variant_count_changed;
         if (new_printer_name.empty()) {
             int diff_keys_size = different_keys_set.size();
             compute_variant_index(m_print_config, load_machine_config, "printer_extruder_id", "printer_extruder_variant", new_variant_index, variant_count_changed);
@@ -3383,38 +3375,10 @@ int CLI::run(int argc, char **argv)
             BOOST_LOG_TRIVIAL(info) << boost::format("no new process, only update the different key, new different_settings: %1%")%different_settings[0];
         }
         else {
-            BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] before update_full_config for process: variant_count_changed=%1%, new_variant_index size=%2%, load_process_config keys=%3%")
-                %variant_count_changed %new_variant_index.size() %load_process_config.keys().size();
-            BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] print_options_with_variant size=%1%, empty_options size=%2%")
-                %print_options_with_variant.size() %empty_options.size();
-            {
-                auto pev = m_print_config.option<ConfigOptionStrings>("print_extruder_variant");
-                BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] BEFORE update: print_extruder_variant ptr=%1%, size=%2%")
-                    %(void*)pev %(pev ? (int)pev->values.size() : -1);
-                auto pei = m_print_config.option<ConfigOptionInts>("print_extruder_id");
-                BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] BEFORE update: print_extruder_id ptr=%1%, size=%2%")
-                    %(void*)pei %(pei ? (int)pei->values.size() : -1);
-                auto nd = m_print_config.option<ConfigOptionFloatsNullable>("nozzle_diameter");
-                BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] BEFORE update: nozzle_diameter ptr=%1%, size=%2%")
-                    %(void*)nd %(nd ? (int)nd->values.size() : -1);
-            }
             ret = update_full_config(m_print_config, load_process_config, different_keys_set, variant_count_changed, print_options_with_variant, empty_options, new_variant_index, true);
-            BOOST_LOG_TRIVIAL(info) << boost::format("load a new process, update all the keys, different_settings: %1%, ret=%2%")%different_settings[0] %ret;
-            {
-                auto pev = m_print_config.option<ConfigOptionStrings>("print_extruder_variant");
-                BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] AFTER update: print_extruder_variant ptr=%1%, size=%2%")
-                    %(void*)pev %(pev ? (int)pev->values.size() : -1);
-                if (pev) {
-                    for (int i = 0; i < (int)pev->values.size(); i++)
-                        BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG]   variant[%1%]=%2%")%i %pev->values[i];
-                }
-            }
+            BOOST_LOG_TRIVIAL(info) << boost::format("load a new process, update all the keys, different_settings: %1%")%different_settings[0];
         }
-        BOOST_LOG_TRIVIAL(info) << "[DEBUG] about to access print_extruder_variant with create=true";
-        auto pev_opt = m_print_config.option<ConfigOptionStrings>("print_extruder_variant", true);
-        BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] pev_opt ptr=%1%") %(void*)pev_opt;
-        current_print_variant_count = pev_opt->values.size();
-        BOOST_LOG_TRIVIAL(info) << boost::format("[DEBUG] current_print_variant_count=%1%") %current_print_variant_count;
+        current_print_variant_count = m_print_config.option<ConfigOptionStrings>("print_extruder_variant", true)->values.size();
 
         if (ret) {
             record_exit_reson(outfile_dir, ret, 0, cli_errors[ret], sliced_info);
