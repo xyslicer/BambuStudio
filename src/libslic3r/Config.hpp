@@ -680,7 +680,13 @@ public:
 
     const T& get_at(size_t i) const
     {
-        assert(! this->values.empty());
+        // Return a static default when the vector is empty to avoid UB.
+        // This can happen in CLI mode when config options are not fully
+        // populated for all extruder variants.
+        if (this->values.empty()) {
+            static const T s_default{};
+            return s_default;
+        }
         return (i < this->values.size()) ? this->values[i] : this->values.front();
     }
 
@@ -1913,12 +1919,18 @@ public:
     }
 
     bool& get_at(size_t i) {
-        assert(! this->values.empty());
+        if (this->values.empty()) {
+            static unsigned char s_default = 0;
+            return *reinterpret_cast<bool*>(&s_default);
+        }
         return *reinterpret_cast<bool*>(&((i < this->values.size()) ? this->values[i] : this->values.front()));
     }
 
     //FIXME this smells, the parent class has the method declared returning (unsigned char&).
-    bool get_at(size_t i) const { return ((i < this->values.size()) ? this->values[i] : this->values.front()) != 0; }
+    bool get_at(size_t i) const {
+        if (this->values.empty()) return false;
+        return ((i < this->values.size()) ? this->values[i] : this->values.front()) != 0;
+    }
 
     std::string serialize() const override
     {
