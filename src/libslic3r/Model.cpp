@@ -325,12 +325,26 @@ Model Model::read_from_file(const std::string&                                  
     else if (boost::algorithm::iends_with(input_file, ".amf"))
         //BBS: is_xxx is used for is_inches when load amf
         result = load_amf(input_file.c_str(), config, config_substitutions, &model, is_xxx);
-    else if (boost::algorithm::iends_with(input_file, ".3mf"))
+    else if (boost::algorithm::iends_with(input_file, ".3mf")) {
         //BBS: add part plate related logic
         // BBS: backup & restore
         //FIXME options & LoadStrategy::CheckVersion ?
         //BBS: is_xxx is used for is_bbs_3mf when load 3mf
-        result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, is_xxx, file_version, proFn, options, project, plate_id);
+        //SLICER: a foreign (PrusaSlicer / generic) 3mf must go through the generic 3mf reader
+        // (load_3mf) so that per-volume extruder assignments, mmu-segmentation paint, custom
+        // supports/seam and the Prusa print config are imported. load_bbs_3mf only understands
+        // BambuStudio project 3mfs. This mirrors Model::read_from_archive, which the GUI already
+        // uses when opening such files.
+        PrusaFileParser prusa_file_parser;
+        if (prusa_file_parser.check_3mf_from_prusa(input_file)) {
+            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": detected a non-BBL (PrusaSlicer/generic) 3mf, using the generic 3mf loader: " << input_file;
+            result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, true);
+            if (is_xxx)
+                *is_xxx = false;
+        }
+        else
+            result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, is_xxx, file_version, proFn, options, project, plate_id);
+    }
 #ifdef __APPLE__
     else if (boost::algorithm::iends_with(input_file, ".usd") || boost::algorithm::iends_with(input_file, ".usda") ||
              boost::algorithm::iends_with(input_file, ".usdc") || boost::algorithm::iends_with(input_file, ".usdz") ||
