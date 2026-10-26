@@ -8,6 +8,8 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/GuiColor.hpp"
 
+#include <algorithm>
+
 using namespace nlohmann;
 
 namespace Slic3r
@@ -77,8 +79,10 @@ namespace Slic3r
         result.color = tray.color;
         result.type = tray.get_filament_type();
         result.filament_id = tray.setting_id;
+        result.setting_id = tray.filament_setting_id.empty() ? tray.setting_id : tray.filament_setting_id;
         result.ctype = tray.ctype;
         result.colors = tray.cols;
+        result.remain = tray.remain; // 0~100, -1 when the printer does not report a remain (e.g. non-genuine spools)
 
         /*for new ams mapping*/
         result.ams_id = std::to_string(ams_id);
@@ -95,6 +99,10 @@ namespace Slic3r
             {
                 result.id = ams_id + slot_id;
             }
+            else if (type == DevAmsType::AMS_LITE_MIXED)
+            {
+                result.id = AMS_LITE_MIXED_TRAY_INDEX_OFFSET + slot_id;
+            }
             else
             {
                 result.id = ams_id * 4 + slot_id;
@@ -102,8 +110,36 @@ namespace Slic3r
         }
     }
 
+    // Tie-break helper for ams_filament_mapping(): returns true when 'candidate' should
+    // replace 'picked' on an exact distance tie because it has less filament remaining,
+    // so partially-used spools are consumed first.
+    // Rules:
+    //  - only when the candidate tray is an exact filament_id match for the sliced filament;
+    //  - only when both trays report a valid remain (>= 0, e.g. genuine/RFID spools);
+    //    an unknown remain (-1) keeps the legacy lowest-slot-first behavior;
+    //  - a tray reporting remain == 0 is never deliberately preferred: a non-empty
+    //    candidate wins over an empty picked tray, never the other way around.
+    static bool _prefer_tray_by_remain(const FilamentInfo& filament, const FilamentInfo& candidate, const FilamentInfo& picked)
+    {
+        if (filament.filament_id != candidate.filament_id)
+            return false;
+        if (candidate.remain <= 0 || picked.remain < 0)
+            return false;
+        return picked.remain == 0 || candidate.remain < picked.remain;
+    }
+
     int DevMappingUtil::ams_filament_mapping(const MachineObject* obj, const std::vector<FilamentInfo>& filaments, std::vector<FilamentInfo>& result, std::vector<bool> map_opt, std::vector<int> exclude_id, bool nozzle_has_ams_then_ignore_ext)
     {
+        // Match priority:
+        //   type (hard) > setting_id (sub-class) > filament_id (class) > color.
+        constexpr float kColorDistanceMin    = 0.f;
+        constexpr float kColorDistanceMax    = 1000.f;   // > real DeltaE76 upper bound (~260)
+        constexpr float kClassDistanceOffset = 10000.f;  // class match (filament_id) only
+        constexpr float kTypeDistanceOffset  = 20000.f;  // same type only
+        constexpr float kMismatchDistance    = 999999.f; // hard fail (type / alpha mismatch)
+        static_assert(kColorDistanceMax < kClassDistanceOffset, "color distance must not override sub-class / class match priority");
+        static_assert(kTypeDistanceOffset - kClassDistanceOffset > kColorDistanceMax, "class-vs-type gap must exceed the color distance range");
+
         if (filaments.empty())
             return -1;
 
@@ -117,6 +153,10 @@ namespace Slic3r
         {
             std::string ams_id = ams->second->GetAmsId();
             auto        ams_type = ams->second->GetAmsType();
+            if (ams_type == DevAmsType::AMS_LITE && ams->second->IsAmsLiteMixed())
+            {
+                ams_type = DevAmsType::AMS_LITE_MIXED;
+            }
             for (auto tray = ams->second->GetTrays().begin(); tray != ams->second->GetTrays().end(); tray++)
             {
                 int ams_id = atoi(ams->first.c_str());
@@ -125,6 +165,10 @@ namespace Slic3r
                 if (ams_type == DevAmsType::AMS || ams_type == DevAmsType::AMS_LITE || ams_type == DevAmsType::N3F)
                 {
                     tray_index = ams_id * 4 + tray_id;
+                }
+                else if (ams_type == DevAmsType::AMS_LITE_MIXED)
+                {
+                    tray_index = AMS_LITE_MIXED_TRAY_INDEX_OFFSET + tray_id;
                 }
                 else if (ams_type == DevAmsType::N3S)
                 {
@@ -218,16 +262,23 @@ namespace Slic3r
                 val.tray_id = tray->second.id;
                 wxColour c = wxColour(filaments[i].color);
                 wxColour tray_c = DevAmsTray::decode_color(tray->second.color);
-                val.distance = GUI::calc_color_distance(c, tray_c);
+                float color_distance = GUI::calc_color_distance(GUI::convert_to_rgba(c), GUI::convert_to_rgba(tray_c));
+                val.distance = std::clamp(color_distance, kColorDistanceMin, kColorDistanceMax);
                 if (filaments[i].type != tray->second.type)
                 {
-                    val.distance = 999999;
+                    val.distance = kMismatchDistance;
                     val.is_type_match = false;
                 }
                 else
                 {
-                    if (c.Alpha() != tray_c.Alpha())
-                        val.distance = 999999;
+                    const bool is_sub_class_match = !filaments[i].setting_id.empty() && !tray->second.setting_id.empty()
+                        && filaments[i].setting_id == tray->second.setting_id;
+                    const bool is_class_match = !filaments[i].filament_id.empty() && !tray->second.filament_id.empty()
+                        && filaments[i].filament_id == tray->second.filament_id;
+                    if (!is_sub_class_match) {
+                        val.distance += is_class_match ? kClassDistanceOffset : kTypeDistanceOffset;
+                    }
+
                     val.is_type_match = true;
                 }
                 ::sprintf(buffer, "  %6.0f", val.distance);
@@ -249,6 +300,7 @@ namespace Slic3r
             info.tray_id = -1;
             info.type = filaments[i].type;
             info.filament_id = filaments[i].filament_id;
+            info.setting_id = filaments[i].setting_id;
             result.push_back(info);
         }
 
@@ -287,7 +339,6 @@ namespace Slic3r
                     {
                         if (min_val > distance_map[i][j].distance)
                         {
-
                             min_val = distance_map[i][j].distance;
                             picked_src_idx = i;
                             picked_tar_idx = j;
@@ -295,7 +346,14 @@ namespace Slic3r
                         }
                         else if (min_val == distance_map[i][j].distance && filaments[picked_src_idx].filament_id != tray_filaments[picked_tar_idx].filament_id && filaments[i].filament_id == tray_filaments[j].filament_id)
                         {
-
+                            picked_src_idx = i;
+                            picked_tar_idx = j;
+                        }
+                        // Same color/type and equal distance: prefer the matching tray with the
+                        // least remaining filament, see _prefer_tray_by_remain() for the rules.
+                        else if (min_val == distance_map[i][j].distance
+                                 && _prefer_tray_by_remain(filaments[i], tray_filaments[j], tray_filaments[picked_tar_idx]))
+                        {
                             picked_src_idx = i;
                             picked_tar_idx = j;
                         }
@@ -321,6 +379,13 @@ namespace Slic3r
                                 picked_src_idx = i;
                                 picked_tar_idx = j;
                             }
+                            // Prefer the matching tray with the least remaining filament (see above).
+                            else if (min_val == distance_map[i][j].distance
+                                     && _prefer_tray_by_remain(filaments[i], tray_filaments[j], tray_filaments[picked_tar_idx]))
+                            {
+                                picked_src_idx = i;
+                                picked_tar_idx = j;
+                            }
                         }
                     }
                 }
@@ -338,6 +403,7 @@ namespace Slic3r
                     result[picked_src_idx].type = tray->second.type;
                     result[picked_src_idx].distance = tray->second.distance;
                     result[picked_src_idx].filament_id = tray->second.filament_id;
+                    result[picked_src_idx].setting_id = tray->second.setting_id;
                     result[picked_src_idx].ctype = tray->second.ctype;
                     result[picked_src_idx].colors = tray->second.colors;
 

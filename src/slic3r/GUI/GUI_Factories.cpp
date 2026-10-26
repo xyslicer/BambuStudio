@@ -110,7 +110,7 @@ std::map<std::string, std::vector<SimpleSettingData>>  SettingsFactory::PART_CAT
                     }},
     { L("Speed"), {{"outer_wall_speed", "",1},{"inner_wall_speed", "",2},{"sparse_infill_speed", "",3},{"top_surface_speed", "",4}, {"internal_solid_infill_speed", "",5},
                     {"enable_overhang_speed", "",6}, {"overhang_1_4_speed", "",7}, {"overhang_2_4_speed", "",8}, {"overhang_3_4_speed", "",9}, {"overhang_4_4_speed", "",10}, {"overhang_totally_speed", "",11},
-                    {"bridge_speed", "",12}, {"gap_infill_speed", "",13}, {"enable_height_slowdown", "", 14}, {"slowdown_start_height", "", 15}, {"slowdown_start_speed", "", 16}, {"slowdown_start_acc", "", 17}, 
+                    {"bridge_speed", "",12}, {"gap_infill_speed", "",13}, {"enable_height_slowdown", "", 14}, {"slowdown_start_height", "", 15}, {"slowdown_start_speed", "", 16}, {"slowdown_start_acc", "", 17},
                     {"slowdown_end_height", "", 18}, {"slowdown_end_speed", "", 19}, {"slowdown_end_acc", "", 20}
                     }}
 };
@@ -465,17 +465,44 @@ std::vector<wxBitmap> MenuFactory::get_svg_volume_bitmaps()
     return volume_bmps;
 }
 
-void MenuFactory::append_menu_item_set_visible(wxMenu* menu)
+void MenuFactory::append_menu_items_assembly_steps(wxMenu* menu)
 {
-    bool has_one_shown = false;
-    const Selection& selection = plater()->canvas3D()->get_selection();
-    for (unsigned int i : selection.get_volume_idxs()) {
-        has_one_shown |= selection.get_volume(i)->visible;
+    GLCanvas3D *canvas = plater()->canvas3D();
+    if (!canvas)
+        return;
+
+    append_menu_item(menu, wxID_ANY, _L("Add to New Step"), "",
+        [](wxCommandEvent&) { plater()->canvas3D()->add_selected_to_new_assembly_step(); }, "", nullptr,
+        []() {
+            GLCanvas3D *canvas = plater()->canvas3D();
+            return canvas && canvas->can_add_selected_to_assembly_step();
+        }, m_parent);
+
+    append_menu_item(menu, wxID_ANY, _L("Add to Current Step"), "",
+        [](wxCommandEvent&) { plater()->canvas3D()->add_selected_to_current_assembly_step(); }, "", nullptr,
+        []() {
+            GLCanvas3D *canvas = plater()->canvas3D();
+            return canvas && canvas->can_add_selected_to_current_assembly_step();
+        }, m_parent);
+
+    wxMenu *step_menu = new wxMenu();
+    for (const auto &[node_idx, label] : canvas->assembly_step_choices()) {
+        // Copy structured-binding fields into ordinary locals before capturing: C++17 forbids capturing structured bindings in lambdas (Clang enforces; MSVC tolerates as an extension).
+        const int         step_node_idx = node_idx;
+        const std::string step_label    = label;
+        append_menu_item(step_menu, wxID_ANY, wxString::FromUTF8(step_label.c_str()), "",
+            [step_node_idx](wxCommandEvent&) { plater()->canvas3D()->add_selected_to_assembly_step(step_node_idx); }, "", step_menu,
+            []() {
+                GLCanvas3D *canvas = plater()->canvas3D();
+                return canvas && canvas->can_add_selected_to_assembly_step();
+            }, m_parent);
     }
 
-    append_menu_item(menu, wxID_ANY, has_one_shown ?_L("Hide") : _L("Show"), "",
-        [has_one_shown](wxCommandEvent&) { plater()->set_selected_visible(!has_one_shown); }, "", nullptr,
-        []() { return true; }, m_parent);
+    append_submenu(menu, step_menu, wxID_ANY, _L("Add to Existing Step"), "", "",
+        []() {
+            GLCanvas3D *canvas = plater()->canvas3D();
+            return canvas && canvas->can_add_selected_to_assembly_step() && !canvas->assembly_step_choices().empty();
+        }, m_parent);
 }
 
 void MenuFactory::append_menu_item_delete(wxMenu* menu)
@@ -570,9 +597,9 @@ wxMenu* MenuFactory::append_submenu_add_generic(wxMenu* menu, ModelVolumeType ty
         sub_menu->AppendSeparator();
     }
 
-    std::vector<std::string> icons = {"Cube", "Cylinder", "Sphere", "Cone", "double_tear_romboid_cylinder", "Disc", "Torus", "rounded_rectangle"};
+    std::vector<std::string> icons = {"Cube", "Cylinder", "hexagonal_prism", "Sphere", "Cone", "double_tear_romboid_cylinder", "Disc", "Torus", "rounded_rectangle", "TearDrop"};
     size_t i = 0;
-    for (auto &item : {L("Cube"), L("Cylinder"), L("Sphere"), L("Cone"), L("Double Tear Romboid Cylinder"), L("Disc"), L("Torus"), L("Rounded Rectangle")})
+    for (auto &item : {L("Cube"), L("Cylinder"), L("Hexagonal Prism"), L("Sphere"), L("Cone"), L("Double Tear Romboid Cylinder"), L("Disc"), L("Torus"), L("Rounded Rectangle"), L("TearDrop")})
     {
         append_menu_item(sub_menu, wxID_ANY, _(item), "",
             [type, item](wxCommandEvent&) { obj_list()->load_generic_subobject(item, type); }, Slic3r::resources_dir() + "/model/" + icons[i++] + ".png", menu);
@@ -912,21 +939,45 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
     if (filaments_cnt <= 1)
         return;
 
-    wxDataViewItemArray sels;
-    obj_list()->GetSelections(sels);
-    if (sels.IsEmpty())
-        return;
+    // In the assembly view the change-filament menu must be driven by the assembly canvas selection
+    // (independent m_assemble_model), not the prepare-side ObjectList.
+    const bool in_assemble = wxGetApp().plater()->get_current_canvas3D() != nullptr &&
+        wxGetApp().plater()->get_current_canvas3D()->get_canvas_type() == GLCanvas3D::ECanvasType::CanvasAssembleView;
+
+    size_t sel_count      = 0;
+    int    initial_extruder = -1; // negative value for multiple object/part selection
+
+    if (in_assemble) {
+        const Selection &asel = wxGetApp().plater()->get_assmeble_canvas3D()->get_selection();
+        if (asel.is_empty())
+            return;
+        const auto &vol_idxs = asel.get_volume_idxs();
+        sel_count = vol_idxs.size();
+        if (sel_count == 1) {
+            const GLVolume *v = asel.get_volume(*vol_idxs.begin());
+            Model *am = asel.get_model();
+            if (v != nullptr && am != nullptr && v->object_idx() >= 0 && v->object_idx() < (int) am->objects.size()) {
+                const ModelObject *mo = am->objects[v->object_idx()];
+                if (mo != nullptr && v->volume_idx() >= 0 && v->volume_idx() < (int) mo->volumes.size())
+                    initial_extruder = mo->volumes[v->volume_idx()]->extruder_id();
+            }
+        }
+    } else {
+        wxDataViewItemArray sels;
+        obj_list()->GetSelections(sels);
+        if (sels.IsEmpty())
+            return;
+        sel_count = sels.Count();
+        if (sel_count == 1) {
+            const ModelConfig& config = obj_list()->get_item_config(sels[0]);
+            // BBS: set default extruder to 1
+            initial_extruder = config.has("extruder") ? config.extruder() : 1;
+        }
+    }
 
     std::vector<wxBitmap*> icons = get_extruder_color_icons(true);
     wxMenu* extruder_selection_menu = new wxMenu();
-    const wxString& name = sels.Count() == 1 ? names[0] : names[1];
-
-    int initial_extruder = -1; // negative value for multiple object/part selection
-    if (sels.Count() == 1) {
-        const ModelConfig& config = obj_list()->get_item_config(sels[0]);
-        // BBS: set default extruder to 1
-        initial_extruder = config.has("extruder") ? config.extruder() : 1;
-    }
+    const wxString& name = sel_count == 1 ? names[0] : names[1];
 
     for (int i = 0; i <= filaments_cnt; i++)
     {
@@ -948,13 +999,19 @@ void MenuFactory::append_menu_item_change_extruder(wxMenu* menu)
             item_name << " (" + _L("current") + ")";
         }
 
+        auto on_pick = [i, in_assemble](wxCommandEvent &) {
+            if (in_assemble)
+                wxGetApp().plater()->change_extruder_for_assemble_selection(i);
+            else
+                obj_list()->set_extruder_for_selected_items(i);
+        };
         if (icon_idx >= 0 && icon_idx < (int)icons.size()) {
             append_menu_item(
-                extruder_selection_menu, wxID_ANY, item_name, "", [i](wxCommandEvent &) { obj_list()->set_extruder_for_selected_items(i); }, *icons[icon_idx], menu,
+                extruder_selection_menu, wxID_ANY, item_name, "", on_pick, *icons[icon_idx], menu,
                 [is_active_extruder]() { return !is_active_extruder; }, m_parent);
         } else {
             append_menu_item(
-                extruder_selection_menu, wxID_ANY, item_name, "", [i](wxCommandEvent &) { obj_list()->set_extruder_for_selected_items(i); }, "", menu,
+                extruder_selection_menu, wxID_ANY, item_name, "", on_pick, "", menu,
                 [is_active_extruder]() { return !is_active_extruder; }, m_parent);
         }
     }
@@ -1347,6 +1404,7 @@ void MenuFactory::create_part_menu()
     wxMenu* menu = &m_part_menu;
     append_menu_item_rename(menu);
     append_menu_item_delete(menu);
+    append_menu_item_clone(menu);
     append_menu_item_reload_from_disk(menu);
     append_menu_item_export_stl(menu);
     append_menu_item_fix_through_netfabb(menu);
@@ -1404,6 +1462,7 @@ void MenuFactory::create_bbl_part_menu()
 {
     wxMenu* menu = &m_part_menu;
 
+    append_menu_item_clone(menu);
     append_menu_item_delete(menu);
     append_menu_item_edit_text(menu);
     append_menu_item_fix_through_netfabb(menu);
@@ -1464,8 +1523,15 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
     if (init) {
         append_menu_item(
             menu, wxID_ANY, _L("Delete"), _L("Delete this filament"), [](wxCommandEvent&) {
-                plater()->sidebar().delete_filament(-2); }, "", nullptr,
+                plater()->sidebar().delete_filament(kSidebarContextMenuFilamentId); }, "", nullptr,
             []() { return plater()->sidebar().combos_filament().size() > 1; }, m_parent);
+    }
+
+    if (init) {
+        append_menu_item(
+            menu, wxID_ANY, _L("Decompose Color"), "", [](wxCommandEvent&) {
+                plater()->sidebar().decompose_filament_color(kSidebarContextMenuFilamentId); }, "", nullptr,
+            []() { return plater()->sidebar().combos_filament().size() >= 2; }, m_parent);
     }
 
     const int item_id = menu->FindItem(_L("Merge with"));
@@ -1483,7 +1549,7 @@ void MenuFactory::create_filament_action_menu(bool init, int active_filament_men
         wxString item_name = preset ? from_u8(preset->label(false)) : wxString::Format(_L("Filament %d"), i + 1);
 
         append_menu_item(sub_menu, wxID_ANY, item_name, "",
-            [i](wxCommandEvent&) { plater()->sidebar().change_filament(-2, i); }, *icons[i], menu,
+            [i](wxCommandEvent&) { plater()->sidebar().change_filament(kSidebarContextMenuFilamentId, i); }, *icons[i], menu,
             []() { return true; }, m_parent);
     }
     append_submenu(menu, sub_menu, wxID_ANY, _L("Merge with"), "", "",
@@ -1758,6 +1824,10 @@ wxMenu* MenuFactory::multi_selection_menu()
         }
         append_menu_item_center(menu);
         append_menu_item_align_distribute(menu);
+        // Split every selected object into objects (iterates the selection, splitting each in turn).
+        append_menu_item(menu, wxID_ANY, _L("Split to objects"), _L("Split the selected objects into multiple objects"),
+            [](wxCommandEvent&) { obj_list()->split_objects(); }, "split_objects", menu,
+            []() { return obj_list()->can_split_objects(); }, m_parent);
         append_menu_item_fix_through_netfabb(menu);
         //append_menu_item_simplify(menu);
         append_menu_item_delete(menu);
@@ -1821,10 +1891,10 @@ wxMenu* MenuFactory::assemble_multi_selection_menu()
             return nullptr;
 
     wxMenu* menu = new MenuWithSeparators();
-    append_menu_item_set_visible(menu);
+    append_menu_items_assembly_steps(menu);
     //append_menu_item_fix_through_netfabb(menu);
     //append_menu_item_simplify(menu);
-    append_menu_item_delete(menu);
+    //append_menu_item_delete(menu);
     menu->AppendSeparator();
     append_menu_item_change_extruder(menu);
     {
@@ -1855,10 +1925,9 @@ wxMenu* MenuFactory::plate_menu()
 wxMenu* MenuFactory::assemble_object_menu()
 {
     wxMenu* menu = new MenuWithSeparators();
-    // Set Visible
-    append_menu_item_set_visible(menu);
+    append_menu_items_assembly_steps(menu);
     // Delete
-    append_menu_item_delete(menu);
+    //append_menu_item_delete(menu);
     //// Object Repair
     //append_menu_item_fix_through_netfabb(menu);
     //// Object Simplify
@@ -1879,9 +1948,8 @@ wxMenu* MenuFactory::assemble_object_menu()
 wxMenu* MenuFactory::assemble_part_menu()
 {
     wxMenu* menu = new MenuWithSeparators();
-
-    append_menu_item_set_visible(menu);
-    append_menu_item_delete(menu);
+    append_menu_items_assembly_steps(menu);
+    //append_menu_item_delete(menu);
     //append_menu_item_simplify(menu);
     menu->AppendSeparator();
 

@@ -57,7 +57,7 @@ typedef int (*func_ping_bind)(void *agent, std::string ping_code);
 typedef int (*func_bind_detect)(void *agent, std::string dev_ip, std::string sec_link, detectResult& detect);
 typedef int (*func_report_consent)(void *agent, std::string expand);
 typedef int (*func_set_server_callback)(void *agent, OnServerErrFn fn);
-typedef int (*func_bind)(void *agent, std::string dev_ip, std::string dev_id, std::string sec_link, std::string timezone, bool improved, OnUpdateStatusFn update_fn);
+typedef int (*func_bind)(void *agent, std::string dev_ip, std::string dev_id, std::string dev_model, std::string sec_link, std::string timezone, bool improved, OnUpdateStatusFn update_fn);
 typedef int (*func_unbind)(void *agent, std::string dev_id);
 typedef std::string (*func_get_bambulab_host)(void *agent);
 typedef std::string (*func_get_user_selected_machine)(void *agent);
@@ -118,6 +118,8 @@ typedef int (*func_get_model_mall_rating_result)(void *agent, int job_id, std::s
 typedef int (*func_get_mw_user_preference)(void *agent, std::function<void(std::string)> callback);
 typedef int (*func_get_mw_user_4ulist)(void *agent, int seed, int limit, std::function<void(std::string)> callback);
 typedef int (*func_get_hms_snapshot)(void* agent, std::string& dev_id, std::string& file_name, std::function<void(std::string, int)> callback);
+typedef int (*func_sync_ams_filaments)(void *agent, AmsSyncParams params, std::string* http_body);
+typedef int (*func_sync_slot_mappings)(void *agent, SlotMappingsSyncParams params, std::string* http_body);
 
 //the NetworkAgent class
 class NetworkAgent
@@ -183,7 +185,7 @@ public:
     int bind_detect(std::string dev_ip, std::string sec_link, detectResult& detect);
     int report_consent(std::string expand);
     int set_server_callback(OnServerErrFn fn);
-    int bind(std::string dev_ip, std::string dev_id, std::string sec_link, std::string timezone, bool improved, OnUpdateStatusFn update_fn);
+    int bind(std::string dev_ip, std::string dev_id, std::string dev_model, std::string sec_link, std::string timezone, bool improved, OnUpdateStatusFn update_fn);
     int unbind(std::string dev_id);
     std::string get_bambulab_host();
     std::string get_user_selected_machine();
@@ -243,6 +245,8 @@ public:
     int get_mw_user_preference(std::function<void(std::string)> callback);
     int get_mw_user_4ulist(int seed, int limit, std::function<void(std::string)> callback);
     int get_hms_snapshot(std::string dev_id, std::string file_name, std::function<void(std::string, int)> callback);
+    int sync_ams_filaments(AmsSyncParams params, std::string* http_body);
+    int sync_slot_mappings(SlotMappingsSyncParams params, std::string* http_body);
     void *get_network_agent() { return network_agent; }
 
 private:
@@ -358,6 +362,8 @@ private:
     static func_get_mw_user_preference get_mw_user_preference_ptr;
     static func_get_mw_user_4ulist     get_mw_user_4ulist_ptr;
     static func_get_hms_snapshot       get_hms_snapshot_ptr;
+    static func_sync_ams_filaments     sync_ams_filaments_ptr;
+    static func_sync_slot_mappings     sync_slot_mappings_ptr;
 };
 
 }

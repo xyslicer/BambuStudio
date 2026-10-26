@@ -70,7 +70,6 @@ using namespace nlohmann;
 #include "libslic3r/Orient.hpp"
 #include "libslic3r/PNGReadWrite.hpp"
 #include "libslic3r/ObjColorUtils.hpp"
-#include "libslic3r/FilamentMixer.hpp"
 
 #include "BambuStudio.hpp"
 //BBS: add exception handler for win32
@@ -91,6 +90,14 @@ using namespace nlohmann;
 #include <X11/Xlib.h>
 #endif
 
+// BBS: for the out-of-memory new-handler (bbl_out_of_memory_handler)
+#include <new> // std::set_new_handler
+#if defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h> // CFUserNotificationDisplayNotice
+#elif !defined(_MSC_VER) && !defined(__MINGW32__)
+#include <unistd.h> // write(), STDERR_FILENO
+#endif
+
 #ifdef SLIC3R_GUI
     #include "slic3r/GUI/GUI_Init.hpp"
 #endif /* SLIC3R_GUI */
@@ -103,6 +110,15 @@ using namespace Slic3r;
 }error_message;*/
 
 #define MAX_CLONEABLE_SIZE 512
+
+// Folder name for portable version configuration storage location.
+// If a directory with this name is found at startup next to the program's executable,
+// it will be used for all settings/profiles storage instead of the usual OS-dependent location.
+// This check can also be overridden using the --datadir CLI argument.
+// The folder check can be disabled entirely at build time by setting this macro to an empty _string_ value ("").
+#ifndef PORTABLE_DATA_DIR_NAME
+    #define PORTABLE_DATA_DIR_NAME  "configuration"
+#endif
 
 std::map<int, std::string> cli_errors = {
     {CLI_SUCCESS, "Success."},
@@ -201,6 +217,11 @@ typedef struct  _sliced_plate_info{
 
     std::vector<object_info_t> objects;
     std::vector<filament_info_t> filaments;
+
+    // first-layer bbox data extracted from PrintObjects before Print::clear() in CLI all-plates mode.
+    int    first_extruder{0};
+    std::vector<BBoxData>         bbox_objs;
+    std::vector<coordf_t>         wipe_tower_bbox; // {min.x, min.y, max.x, max.y} if wipe tower exists
 }sliced_plate_info_t;
 
 typedef struct _sliced_info {
@@ -1360,6 +1381,14 @@ static int construct_assemble_list(std::vector<assemble_plate_info_t> &assemble_
     return ret;
 }
 
+// Empty compatible_printers means compatible with all printers (same as Preset::is_compatible_with_printer).
+static bool is_preset_compatible_with_printer(const std::vector<std::string> &compatible_printers, const std::string &printer_system_name)
+{
+    if (printer_system_name.empty() || compatible_printers.empty())
+        return true;
+    return std::find(compatible_printers.begin(), compatible_printers.end(), printer_system_name) != compatible_printers.end();
+}
+
 // For estimate_mode: given a source filament preset name (e.g. "Bambu PLA Basic @BBL P1S 0.4 nozzle")
 // and the new machine's BBL tag (e.g. "X2D 0.4 nozzle"), construct the target filament preset name
 // (e.g. "Bambu PLA Basic @BBL X2D 0.4 nozzle") and verify it exists in filament_full_dir.
@@ -1574,7 +1603,7 @@ int CLI::run(int argc, char **argv)
             boost::algorithm::iends_with(boost::filesystem::path(argv[0]).filename().string(), "gcodeviewer");
 #endif // _WIN32*/
 
-    bool translate_old = false, regenerate_thumbnails = false, keep_old_params = false, remove_wrapping_detect = false, filament_color_changed = false, downward_check = false;
+    bool translate_old = false, regenerate_thumbnails = false, keep_old_params = false, remove_wrapping_detect = false, filament_color_changed = false, downward_check = false, skirt_per_object_reset = false;
     int current_printable_width, current_printable_depth, current_printable_height, shrink_to_new_bed = 0;
     int old_printable_height = 0, old_printable_width = 0, old_printable_depth = 0;
     Pointfs old_printable_area, old_exclude_area;
@@ -1675,7 +1704,7 @@ int CLI::run(int argc, char **argv)
     std::vector<plate_obj_size_info_t> plate_obj_size_infos;
     //int arrange_option;
     int plate_to_slice = 0, filament_count = 0, duplicate_count = 0, real_duplicate_count = 0, current_extruder_count = 1, new_extruder_count = 1, current_printer_variant_count = 1, current_print_variant_count = 1, new_printer_variant_count = 1;
-    bool first_file = true, is_bbl_3mf = false, need_arrange = true, has_thumbnails = false, up_config_to_date = false, normative_check = true, duplicate_single_object = false, use_first_fila_as_default = false, minimum_save = false, enable_timelapse = false, has_support = false, estimate_mode = false;
+    bool first_file = true, is_bbl_3mf = false, need_arrange = true, has_thumbnails = false, up_config_to_date = false, normative_check = true, duplicate_single_object = false, use_first_fila_as_default = false, minimum_save = false, enable_timelapse = false, has_support = false, estimate_mode = false, check_preset = false;
     bool allow_rotations = true, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false, current_is_multi_extruder = false, new_is_multi_extruder = false, allow_mix_temp = false, enable_wrapping_detect = false;
     Semver file_version;
     Slic3r::GUI::Camera::ViewAngleType camera_view = Slic3r::GUI::Camera::ViewAngleType::Iso;
@@ -1747,6 +1776,10 @@ int CLI::run(int argc, char **argv)
     ConfigOptionBool* estimate_mode_option = m_config.option<ConfigOptionBool>("estimate_mode");
     if (estimate_mode_option)
         estimate_mode = estimate_mode_option->value;
+
+    ConfigOptionBool* check_preset_option = m_config.option<ConfigOptionBool>("check_preset");
+    if (check_preset_option)
+        check_preset = check_preset_option->value;
 
     ConfigOptionInt* camera_view_option = m_config.option<ConfigOptionInt>("camera_view");
     if (camera_view_option)
@@ -1909,7 +1942,7 @@ int CLI::run(int argc, char **argv)
                         record_exit_reson(outfile_dir, CLI_FILE_VERSION_NOT_SUPPORTED, 0, cli_errors[CLI_FILE_VERSION_NOT_SUPPORTED], sliced_info);
                         flush_and_exit(CLI_FILE_VERSION_NOT_SUPPORTED);
                     }
-                    Semver old_version(1, 5, 9), old_version2(1, 5, 9), old_version3(2, 0, 0), old_version4(2, 2, 0);
+                    Semver old_version(1, 5, 9), old_version2(1, 5, 9), old_version3(2, 0, 0), old_version4(2, 2, 0), old_version5(2, 7, 0);
                     if ((file_version < old_version) && !config.empty()) {
                         translate_old = true;
                         BOOST_LOG_TRIVIAL(info) << boost::format("old 3mf version %1%, need to translate")%file_version.to_string();
@@ -1940,6 +1973,11 @@ int CLI::run(int argc, char **argv)
                         BOOST_LOG_TRIVIAL(info) << boost::format("old 3mf version %1%, need to set enable_wrapping_detection to false")%file_version.to_string();
                     }
 
+                    if (file_version < old_version5) {
+                        skirt_per_object_reset = true;
+                        BOOST_LOG_TRIVIAL(info) << boost::format("old 3mf version %1%, need to set skirt_per_object to false")%file_version.to_string();
+                    }
+
                     if (normative_check) {
                         ConfigOptionStrings* postprocess_scripts = config.option<ConfigOptionStrings>("post_process");
                         if (postprocess_scripts) {
@@ -1949,13 +1987,6 @@ int CLI::run(int argc, char **argv)
                                 record_exit_reson(outfile_dir, CLI_POSTPROCESS_NOT_SUPPORTED, 0, cli_errors[CLI_POSTPROCESS_NOT_SUPPORTED], sliced_info);
                                 flush_and_exit(CLI_POSTPROCESS_NOT_SUPPORTED);
                             }
-                        }
-
-                        ConfigOptionBools* filament_is_mixed = config.option<ConfigOptionBools>("filament_is_mixed");
-                        if (filament_is_mixed && has_any_mixed_filament(filament_is_mixed->values)) {
-                            BOOST_LOG_TRIVIAL(error) << "normative_check: mixed filament is not supported";
-                            record_exit_reson(outfile_dir, CLI_3MF_FEATURE_NOT_SUPPORTED, 0, cli_errors[CLI_3MF_FEATURE_NOT_SUPPORTED], sliced_info);
-                            flush_and_exit(CLI_3MF_FEATURE_NOT_SUPPORTED);
                         }
                     }
 
@@ -2637,7 +2668,7 @@ int CLI::run(int argc, char **argv)
     if (filament_count == 0)
         filament_count = load_filament_count;
 
-    if (is_bbl_3mf && (load_filament_count > 0) && (load_filaments_set.size() == 1))
+    if (is_bbl_3mf && (load_filament_count > 0) && (load_filaments_set.size() == 1) && !estimate_mode)
     {
         disable_wipe_tower_after_mapping = true;
         BOOST_LOG_TRIVIAL(info) << boost::format("map all the filaments to the same one, load_filament_count %1%")%load_filament_count;
@@ -3017,6 +3048,31 @@ int CLI::run(int argc, char **argv)
         BOOST_LOG_TRIVIAL(error) <<__FUNCTION__ << boost::format(" %1%: process not compatible with printer.")%__LINE__;
         record_exit_reson(outfile_dir, CLI_PROCESS_NOT_COMPATIBLE, 0, cli_errors[CLI_PROCESS_NOT_COMPATIBLE], sliced_info);
         flush_and_exit(CLI_PROCESS_NOT_COMPATIBLE);
+    }
+
+    // Validate compatible_printers for externally loaded filament presets.
+    if (check_preset) {
+        std::string effective_printer_system_name;
+        if (!new_printer_system_name.empty())
+            effective_printer_system_name = new_printer_system_name;
+        else
+            effective_printer_system_name = current_printer_system_name;
+
+        if (!effective_printer_system_name.empty()) {
+            for (size_t index = 0; index < load_filaments_config.size(); ++index) {
+                const auto *compatible_printers_opt = load_filaments_config[index].option<ConfigOptionStrings>("compatible_printers");
+                if (!compatible_printers_opt) continue;
+                const std::vector<std::string> &compatible_printers = compatible_printers_opt->values;
+                if (is_preset_compatible_with_printer(compatible_printers, effective_printer_system_name)) continue;
+
+                const std::string &filament_name = (index < load_filaments_name.size()) ? load_filaments_name[index] : "";
+                BOOST_LOG_TRIVIAL(error) << __FUNCTION__
+                                         << boost::format(" %1%: filament preset %2% (slot %3%) is not compatible with printer %4%.") % __LINE__ % filament_name % (index + 1) %
+                                                effective_printer_system_name;
+                record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
+                flush_and_exit(CLI_CONFIG_FILE_ERROR);
+            }
+        }
     }
 
     if (estimate_mode && (new_printer_name.empty() || current_printer_name.empty() || (new_printer_name == current_printer_name))) {
@@ -3842,10 +3898,23 @@ int CLI::run(int argc, char **argv)
             std::vector<double> &flush_vol_matrix = m_print_config.option<ConfigOptionFloats>("flush_volumes_matrix", true)->values;
             flush_vol_matrix.resize(project_filament_count * project_filament_count * new_extruder_count, 0.f);
 
+            const std::vector<std::string>& flush_filament_ids = m_print_config.option<ConfigOptionStrings>("filament_ids", true)->values;
+            auto get_flush_filament_id = [&flush_filament_ids](int idx) -> std::string {
+                return (idx >= 0 && idx < (int)flush_filament_ids.size()) ? flush_filament_ids[idx] : std::string();
+            };
+            {
+                std::ostringstream ids_str;
+                for (size_t i = 0; i < flush_filament_ids.size(); ++i)
+                    ids_str << "[" << i << "]=" << flush_filament_ids[i] << " ";
+                BOOST_LOG_TRIVIAL(info) << "flush filament_ids (count=" << flush_filament_ids.size() << "): " << ids_str.str();
+            }
+
             // set multiplier to 1?
             std::vector<double>& flush_multipliers = m_print_config.option<ConfigOptionFloats>("flush_multiplier", true)->values;
             flush_multipliers.resize(new_extruder_count, 1.f);
 
+            std::vector<double> &flush_multipliers_fast = m_print_config.option<ConfigOptionFloats>("flush_multiplier_fast", true)->values;
+            flush_multipliers_fast.resize(new_extruder_count, 1.2f);
             std::vector<int> nozzle_flush_dataset(new_extruder_count, 0);
             {
                 std::vector<int> nozzle_flush_dataset_full = m_print_config.option<ConfigOptionIntsNullable>("nozzle_flush_dataset",true)->values;
@@ -3898,7 +3967,7 @@ int CLI::run(int argc, char **argv)
                                 Slic3r::GUI::BitmapCache::parse_color4(to_color, to_rgb);
 
                                 Slic3r::FlushVolCalculator calculator(min_flush_volumes[from_idx], Slic3r::g_max_flush_volume,nozzle_flush_dataset[nozzle_id]);
-                                flushing_volume = calculator.calc_flush_vol(from_rgb[3], from_rgb[0], from_rgb[1], from_rgb[2], to_rgb[3], to_rgb[0], to_rgb[1], to_rgb[2]);
+                                flushing_volume = calculator.calc_flush_vol(get_flush_filament_id(from_idx), get_flush_filament_id(to_idx), from_rgb[3], from_rgb[0], from_rgb[1], from_rgb[2], to_rgb[3], to_rgb[0], to_rgb[1], to_rgb[2]);
                                 if (is_from_support) { flushing_volume = std::max(Slic3r::g_min_flush_volume_from_support, flushing_volume); }
                             }
 
@@ -4087,7 +4156,7 @@ int CLI::run(int argc, char **argv)
     2. 判断是否切换了机型，若机型切换，则需要重新设置默认值（此时会将默认参数修复）
     3. 判断是否切换了流量，若流量切换，重新设置对应流量，并复制原先的喷嘴数量
     */
-    bool has_extruder_nozzle_stats = m_print_config.has("extruder_nozzle_stats");
+    bool has_extruder_nozzle_stats = m_print_config.has("extruder_nozzle_stats_new") || m_print_config.has("extruder_nozzle_stats");
     ExtruderNozzleStat nozzle_stats_obj;
 
     // Synchronize the default parameters and the ones received on the command line.
@@ -4137,8 +4206,11 @@ int CLI::run(int argc, char **argv)
         nozzle_stats_obj.on_printer_model_change_cli(curr_volume_map_value, max_nozzle_count);
     }
     else {
-        auto nozzle_stat_str = m_print_config.option<ConfigOptionStrings>("extruder_nozzle_stats")->values;
-        nozzle_stats_obj.set_raw_stat(get_extruder_nozzle_stats(nozzle_stat_str));
+        const auto *nozzle_stats_opt = m_print_config.option<ConfigOptionStrings>("extruder_nozzle_stats_new");
+        if (nozzle_stats_opt == nullptr || nozzle_stats_opt->values.empty())
+            nozzle_stats_opt = m_print_config.option<ConfigOptionStrings>("extruder_nozzle_stats");
+        if (nozzle_stats_opt != nullptr)
+            nozzle_stats_obj.set_raw_stat(get_extruder_nozzle_stats(nozzle_stats_opt->values));
     }
 
 
@@ -4146,6 +4218,12 @@ int CLI::run(int argc, char **argv)
     BOOST_LOG_TRIVIAL(info) << boost::format("%1%, remove_wrapping_detect %2%, old value %3%")%__LINE__ %remove_wrapping_detect %enable_wrapping_detection_option->value;
     if (is_bbl_3mf && remove_wrapping_detect) {
         enable_wrapping_detection_option->value = false;
+    }
+
+    if (is_bbl_3mf && skirt_per_object_reset) {
+        ConfigOptionBool* skirt_per_object_option = m_print_config.option<ConfigOptionBool>("skirt_per_object", true);
+        BOOST_LOG_TRIVIAL(info) << boost::format("%1%, skirt_per_object_reset, old value %2%")%__LINE__ %skirt_per_object_option->value;
+        skirt_per_object_option->value = false;
     }
     enable_wrapping_detect = enable_wrapping_detection_option->value;
     Pointfs current_wrapping_exclude_area = m_print_config.opt<ConfigOptionPoints>("wrapping_exclude_area", true)->values;
@@ -7067,6 +7145,16 @@ int CLI::run(int argc, char **argv)
                                     BOOST_LOG_TRIVIAL(info) << "print::process: first time_using_cache is " << slice_time[TIME_USING_CACHE] << " secs.";
                                 }
                                 if (printer_technology == ptFFF) {
+                                    FilamentMapMode current_map_mode = print_fff->config().filament_map_mode.value;
+                                    if (is_auto_filament_map_mode(current_map_mode)) {
+                                        part_plate->set_filament_maps(print_fff->get_filament_maps());
+                                        part_plate->set_filament_volume_maps(print_fff->get_filament_volume_maps());
+                                    }
+                                    if (current_map_mode != FilamentMapMode::fmmNozzleManual) {
+                                        std::vector<int> f_nozzle_maps = print_fff->get_filament_nozzle_maps();
+                                        part_plate->set_filament_nozzle_maps(f_nozzle_maps);
+                                    }
+
                                     std::string conflict_result = print_fff->get_conflict_string();
                                     if (!conflict_result.empty()) {
                                        BOOST_LOG_TRIVIAL(error) << "plate "<< index+1<< ": found slicing result conflict!"<< std::endl;
@@ -7148,8 +7236,13 @@ int CLI::run(int argc, char **argv)
                                     BOOST_LOG_TRIVIAL(info) << "export_gcode finished: time_using_cache update to " << slice_time[TIME_USING_CACHE] << " secs.";
 
                                     if (gcode_result && gcode_result->gcode_check_result.error_code) {
-                                        BOOST_LOG_TRIVIAL(error) << "plate " << index + 1 << ": found gcode unprintable! gcode_result->gcode_check_result.error_code = "
+                                        if (gcode_result->gcode_check_result.error_code == (1 << 11))
+                                            BOOST_LOG_TRIVIAL(warning)
+                                                << "plate " << index + 1 << ": found too heavy printed weight for i3. gcode_result->gcode_check_result.error_code = "
                                                 << gcode_result->gcode_check_result.error_code << std::endl;
+                                        else
+                                            BOOST_LOG_TRIVIAL(error) << "plate " << index + 1 << ": found gcode unprintable! gcode_result->gcode_check_result.error_code = "
+                                                                     << gcode_result->gcode_check_result.error_code << std::endl;
                                         //found gcode error
                                         if (gcode_result->gcode_check_result.error_code & 0b1100) {
                                             record_exit_reson(outfile_dir, CLI_GCODE_PATH_OUTSIDE, index + 1, cli_errors[CLI_GCODE_PATH_OUTSIDE], sliced_info);
@@ -7325,7 +7418,51 @@ int CLI::run(int argc, char **argv)
                                         flush_and_exit(CLI_SLICING_TIME_EXCEEDS_LIMIT);
                                     }
                                 }
+                                // CLI all-plates mode: before pushing to sliced_plates, cache the
+                                // data we'll still need after Print/GCodeResult memory is freed.
+                                if (plate_to_slice == 0) {
+                                    // first-layer bbox of each print object (used by first_layer_bboxes loop)
+                                    sliced_plate_info.first_extruder = print_fff->get_tool_ordering().first_extruder();
+                                    auto orig_cli = part_plate->get_origin();
+                                    Vec2d orig2d_cli = { orig_cli[0], orig_cli[1] };
+                                    for (auto obj_cli : print_fff->objects()) {
+                                        BBoxData bd;
+                                        auto bb_scaled = obj_cli->get_first_layer_bbox(bd.area, bd.layer_height, bd.name);
+                                        auto bb = unscaled(bb_scaled);
+                                        bd.area *= (SCALING_FACTOR * SCALING_FACTOR);
+                                        bd.id   = obj_cli->id().id;
+                                        bd.bbox = { bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y() };
+                                        sliced_plate_info.bbox_objs.emplace_back(std::move(bd));
+                                    }
+                                    if (print_fff->has_wipe_tower()) {
+                                        auto wt_corners = print_fff->first_layer_wipe_tower_corners();
+                                        if (!wt_corners.empty()) {
+                                            BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
+                                            auto bb = unscaled(bb_scaled);
+                                            bb.min -= orig2d_cli;
+                                            bb.max -= orig2d_cli;
+                                            sliced_plate_info.wipe_tower_bbox = { bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y() };
+                                        }
+                                    }
+                                }
+
                                 sliced_info.sliced_plates.push_back(sliced_plate_info);
+
+                                // CLI all-plates mode: release the two largest memory consumers
+                                // now that all needed data has been extracted into sliced_plate_info.
+                                // - print_fff->clear() releases all PrintObject slice data (layers, supports).
+                                // - clearing moves/lines_ends frees the gcode path buffer, which is
+                                //   the other large allocation; the rest of gcode_result is left intact
+                                //   so that store_to_3mf_structure() can still read fields like
+                                //   layer_filaments, filament_change_sequence, label_object_enabled, etc.
+                                if (plate_to_slice == 0) {
+                                    print_fff->clear();
+                                    gcode_result->moves.clear();
+                                    gcode_result->moves.shrink_to_fit();
+                                    gcode_result->lines_ends.clear();
+                                    gcode_result->lines_ends.shrink_to_fit();
+                                    BOOST_LOG_TRIVIAL(info) << boost::format("Plate %1%: slice data released to free memory.")%(index+1);
+                                }
                             } catch (const std::exception &ex) {
                                 BOOST_LOG_TRIVIAL(error) << "found slicing or export error for partplate "<<index+1 << std::endl;
                                 boost::nowide::cerr << ex.what() << std::endl;
@@ -7892,6 +8029,7 @@ int CLI::run(int argc, char **argv)
                 plate_bboxes.push_back(new PlateBBoxData());
                 continue;
             }
+
             PrintBase  *print_base=NULL;
             Slic3r::GUI::GCodeResult *gcode_result = NULL;
             int print_index;
@@ -7937,7 +8075,6 @@ int CLI::run(int argc, char **argv)
                 BOOST_LOG_TRIVIAL(info) << boost::format("plate %1% print by object, set from plate self")%(i+1);
                 plate_bbox->is_seq_print = true;
             }
-            plate_bbox->first_extruder = print->get_tool_ordering().first_extruder();
             //bed type;
             BedType plate_bed_type = part_plate->get_bed_type();
             if (plate_bed_type == btDefault) {
@@ -7949,43 +8086,75 @@ int CLI::run(int argc, char **argv)
             }
             else {
                 BOOST_LOG_TRIVIAL(info) << boost::format("plate %1% bed type: %2%, set from plate self")%(i+1) %plate_bed_type;
-                plate_bbox->bed_type       = bed_type_to_gcode_string(plate_bed_type);
+                plate_bbox->bed_type = bed_type_to_gcode_string(plate_bed_type);
             }
-            // get nozzle diameter
-            auto opt_nozzle_diameters = m_print_config.option<ConfigOptionFloatsNullable>("nozzle_diameter");
-            if (opt_nozzle_diameters != nullptr)
-                plate_bbox->nozzle_diameter = float(opt_nozzle_diameters->get_at(plate_bbox->first_extruder));
 
-            auto objects = print->objects();
-            auto orig = part_plate->get_origin();
-            Vec2d orig2d = { orig[0], orig[1] };
+            if (plate_to_slice == 0) {
+                // CLI all-plates mode: Print memory was already released after slicing.
+                // Use the bbox data cached into sliced_plate_info during slicing.
+                // sliced_plates is populated in plate order, so index i maps directly.
+                if (i < (int)sliced_info.sliced_plates.size()) {
+                    const sliced_plate_info_t* spi = &sliced_info.sliced_plates[i];
+                    plate_bbox->first_extruder = spi->first_extruder;
+                    // get nozzle diameter
+                    auto opt_nozzle_diameters = m_print_config.option<ConfigOptionFloatsNullable>("nozzle_diameter");
+                    if (opt_nozzle_diameters != nullptr)
+                        plate_bbox->nozzle_diameter = float(opt_nozzle_diameters->get_at(plate_bbox->first_extruder));
 
-            for (auto obj : objects)
-            {
-                BBoxData data;
-                auto bb_scaled = obj->get_first_layer_bbox(data.area, data.layer_height, data.name);
-                auto bb = unscaled(bb_scaled);
-                bbox_all.merge(bb);
-                data.area *= (SCALING_FACTOR * SCALING_FACTOR); // unscale area
-                data.id = obj->id().id;
-                data.bbox = { bb.min.x(),bb.min.y(),bb.max.x(),bb.max.y() };
-                id_bboxes.emplace_back(std::move(data));
-            }
-            // add wipe tower bounding box
-            if (print->has_wipe_tower()) {
-                BBoxData data;
-                auto   wt_corners = print->first_layer_wipe_tower_corners();
-                // when loading gcode.3mf, wipe tower info may not be correct
-                if (!wt_corners.empty()) {
-                    BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
-                    auto        bb        = unscaled(bb_scaled);
-                    bb.min -= orig2d;
-                    bb.max -= orig2d;
+                    for (const BBoxData& bd : spi->bbox_objs) {
+                        BoundingBoxf bb(Vec2d(bd.bbox[0], bd.bbox[1]), Vec2d(bd.bbox[2], bd.bbox[3]));
+                        bbox_all.merge(bb);
+                        id_bboxes.push_back(bd);
+                    }
+                    if (!spi->wipe_tower_bbox.empty()) {
+                        BBoxData data;
+                        BoundingBoxf bb(Vec2d(spi->wipe_tower_bbox[0], spi->wipe_tower_bbox[1]),
+                                        Vec2d(spi->wipe_tower_bbox[2], spi->wipe_tower_bbox[3]));
+                        bbox_all.merge(bb);
+                        data.name = "wipe_tower";
+                        data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
+                        data.bbox = spi->wipe_tower_bbox;
+                        id_bboxes.emplace_back(std::move(data));
+                    }
+                }
+            } else {
+                plate_bbox->first_extruder = print->get_tool_ordering().first_extruder();
+                // get nozzle diameter
+                auto opt_nozzle_diameters = m_print_config.option<ConfigOptionFloatsNullable>("nozzle_diameter");
+                if (opt_nozzle_diameters != nullptr)
+                    plate_bbox->nozzle_diameter = float(opt_nozzle_diameters->get_at(plate_bbox->first_extruder));
+
+                auto objects = print->objects();
+                auto orig = part_plate->get_origin();
+                Vec2d orig2d = { orig[0], orig[1] };
+
+                for (auto obj : objects)
+                {
+                    BBoxData data;
+                    auto bb_scaled = obj->get_first_layer_bbox(data.area, data.layer_height, data.name);
+                    auto bb = unscaled(bb_scaled);
                     bbox_all.merge(bb);
-                    data.name = "wipe_tower";
-                    data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
-                    data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
+                    data.area *= (SCALING_FACTOR * SCALING_FACTOR); // unscale area
+                    data.id = obj->id().id;
+                    data.bbox = { bb.min.x(),bb.min.y(),bb.max.x(),bb.max.y() };
                     id_bboxes.emplace_back(std::move(data));
+                }
+                // add wipe tower bounding box
+                if (print->has_wipe_tower()) {
+                    BBoxData data;
+                    auto   wt_corners = print->first_layer_wipe_tower_corners();
+                    // when loading gcode.3mf, wipe tower info may not be correct
+                    if (!wt_corners.empty()) {
+                        BoundingBox bb_scaled = {wt_corners[0], wt_corners[2]};
+                        auto        bb        = unscaled(bb_scaled);
+                        bb.min -= orig2d;
+                        bb.max -= orig2d;
+                        bbox_all.merge(bb);
+                        data.name = "wipe_tower";
+                        data.id   = partplate_list.get_curr_plate()->get_index() + 1000;
+                        data.bbox = {bb.min.x(), bb.min.y(), bb.max.x(), bb.max.y()};
+                        id_bboxes.emplace_back(std::move(data));
+                    }
                 }
             }
             plate_bbox->bbox_all = { bbox_all.min.x(),bbox_all.min.y(),bbox_all.max.x(),bbox_all.max.y() };
@@ -8168,29 +8337,37 @@ bool CLI::setup(int argc, char **argv)
     }
 #endif
 
-    // See Invoking prusa-slicer from $PATH environment variable crashes #5542
-    // boost::filesystem::path path_to_binary = boost::filesystem::system_complete(argv[0]);
-    boost::filesystem::path path_to_binary = boost::dll::program_location();
+    // Fully resolved directory path of program's runtime base "installation" folder, which may be "portable" version run from any arbitrary location.
+    boost::filesystem::path install_path;
+    // Starting with the current location of the binary being executed.
+    try {
+        install_path = boost::filesystem::canonical(boost::dll::program_location()).parent_path();
+    } catch (std::exception &e) {
+        // boost log not initialized yet
+        boost::nowide::cerr << "Could not determine canonical path to application directory!" << std::endl << e.what() << std::endl << std::endl;
+        return false;
+    }
 
-    // Path from the Slic3r binary to its resources.
+    // Path from the program binary to its resources.
 #ifdef __APPLE__
-    // The application is packed in the .dmg archive as 'Slic3r.app/Contents/MacOS/Slic3r'
-    // The resources are packed to 'Slic3r.app/Contents/Resources'
-    boost::filesystem::path path_resources = boost::filesystem::canonical(path_to_binary).parent_path().parent_path() / "Resources";
-#elif defined _WIN32
+    // The application is packed in the .dmg archive as 'BambuStudio.app/Contents/MacOS/BambuStudio'
+    // The resources are packed to 'BambuStudio.app/Contents/Resources'
+    const boost::filesystem::path path_resources = install_path.parent_path() / "Resources";
+    // For file system access outside the bundle, to check for datadir folder at that level.
+    install_path = install_path.parent_path().parent_path().parent_path();
+#elif defined(_WIN32)
     // The application is packed in the .zip archive in the root,
-    // The resources are packed to 'resources'
-    // Path from Slic3r binary to resources:
-    boost::filesystem::path path_resources = path_to_binary.parent_path() / "resources";
-#elif defined SLIC3R_FHS
+    // The resources are packed to 'resources' in the root.
+    const boost::filesystem::path path_resources = install_path / "resources";
+#elif defined(SLIC3R_FHS)
     // The application is packaged according to the Linux Filesystem Hierarchy Standard
     // Resources are set to the 'Architecture-independent (shared) data', typically /usr/share or /usr/local/share
-    boost::filesystem::path path_resources = SLIC3R_FHS_RESOURCES;
+    const boost::filesystem::path path_resources = SLIC3R_FHS_RESOURCES;
 #else
-    // The application is packed in the .tar.bz archive (or in AppImage) as 'bin/slic3r',
-    // The resources are packed to 'resources'
-    // Path from Slic3r binary to resources:
-    boost::filesystem::path path_resources = boost::filesystem::canonical(path_to_binary).parent_path().parent_path() / "resources";
+    // The application is packed in the .tar.bz archive (or in AppImage) as 'bin/bambu-studio',
+    // The resources are packed to 'resources' in the root.
+    install_path = install_path.parent_path();
+    const boost::filesystem::path path_resources = install_path / "resources";
 #endif
 
     set_resources_dir(path_resources.string());
@@ -8223,14 +8400,37 @@ bool CLI::setup(int argc, char **argv)
         for (const t_optiondef_map::value_type &optdef : *options)
             m_config.option(optdef.first, true);
 
-    //set_data_dir(m_config.opt_string("datadir"));
-
     //FIXME Validating at this stage most likely does not make sense, as the config is not fully initialized yet.
     if (!validity.empty()) {
         boost::nowide::cerr << "Params in command line error: "<< std::endl;
         for (std::map<std::string, std::string>::iterator it=validity.begin(); it!=validity.end(); ++it)
             boost::nowide::cerr << it->first <<": "<< it->second << std::endl;
         return false;
+    }
+
+    // Set custom configuration storage location if invoked with --datadir argument.
+    if (m_config.has("datadir") && !m_config.opt_string("datadir").empty()) {
+        // Don't validate existence or create it right now, should be done in GUI_App::init_app_config(), same as for default data dir.
+        // We do want to store the full path in native format because that's how all other sources of the global data_dir are stored.
+        set_data_dir(boost::filesystem::absolute(m_config.opt_string("datadir")).make_preferred().string());
+    }
+    // Check for special configuration folder at the same level as the installation path.
+    else if (std::strlen(PORTABLE_DATA_DIR_NAME) > 0) {
+        boost::filesystem::path local_data_dir_path = install_path / PORTABLE_DATA_DIR_NAME;
+        if (boost::filesystem::exists(local_data_dir_path)) {
+            set_data_dir(local_data_dir_path.make_preferred().string());
+        }
+#if defined(__linux__) || defined(__LINUX__)
+        // If running from an AppImage, the original package location is stored in APPIMAGE env. var.
+        // The user may have a loclal config folder at the same level as the image file, not inside the image itself.
+        else if (const char *appimage_env = std::getenv("APPIMAGE")) {
+            boost::system::error_code ec;
+            local_data_dir_path = boost::filesystem::canonical(boost::filesystem::path(appimage_env).parent_path() / PORTABLE_DATA_DIR_NAME, ec);
+            // Ignore errors, no local config folder or couldn't resolve APPIMAGE at all for some reason.
+            if (!ec)
+                set_data_dir(local_data_dir_path.string());
+        }
+#endif  // __linux__
     }
 
     return true;
@@ -8475,6 +8675,52 @@ LONG WINAPI VectoredExceptionHandler(PEXCEPTION_POINTERS pExceptionInfo)
     return EXCEPTION_CONTINUE_SEARCH;
 }*/
 
+// BBS: out-of-memory new-handler, installed on every platform
+#define BBL_OOM_TITLE "Bambu Studio - Out of Memory"
+#define BBL_OOM_BODY \
+    "Bambu Studio has run out of memory and must close.\n\n" \
+    "Your project may be too large for the available memory. " \
+    "Try closing other applications, reducing the model complexity " \
+    "or plate count, and restart."
+
+#if defined(_MSC_VER) || defined(__MINGW32__)
+// Windows: raw Win32 MessageBoxW with static wide literals; no wx, no allocation.
+static void bbl_oom_notify_windows() { ::MessageBoxW(nullptr, L"" BBL_OOM_BODY, L"" BBL_OOM_TITLE, MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND); }
+#elif defined(__APPLE__)
+// macOS: CFUserNotification works without a running event loop and takes static
+// CFString literals (no heap use beyond CF internals). Best-effort.
+static void bbl_oom_notify_macos()
+{ CFUserNotificationDisplayNotice(0.0, kCFUserNotificationStopAlertLevel, nullptr, nullptr, nullptr, CFSTR(BBL_OOM_TITLE), CFSTR(BBL_OOM_BODY), nullptr); }
+#else
+// Linux: no allocation-free GUI primitive is safe under OOM (GTK allocates; fork+exec
+// of zenity can itself fail when memory is gone). Emit an async-signal-safe message to
+// stderr instead of a dialog.
+static void bbl_oom_notify_linux()
+{
+    const char msg[] = "\n" BBL_OOM_TITLE "\n" BBL_OOM_BODY "\n\n";
+    ssize_t    n     = ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void) n;
+}
+#endif
+
+static void bbl_out_of_memory_handler()
+{
+    // Notify once; if new keeps failing (or fails on another thread), avoid stacking
+    // dialogs or recursing.
+    static volatile long s_reported = 0;
+#if defined(_MSC_VER) || defined(__MINGW32__)
+    if (::InterlockedCompareExchange(&s_reported, 1, 0) == 0) bbl_oom_notify_windows();
+#elif defined(__APPLE__)
+    if (__sync_val_compare_and_swap(&s_reported, 0, 1) == 0) bbl_oom_notify_macos();
+#else
+    if (__sync_val_compare_and_swap(&s_reported, 0, 1) == 0) bbl_oom_notify_linux();
+#endif
+
+    // Fall through: crash so a dump is still generated.
+    int *a = nullptr;
+    *a     = 0;
+}
+
 #if defined(_MSC_VER) || defined(__MINGW32__)
 extern "C" {
     __declspec(dllexport) int __stdcall bambustu_main(int argc, wchar_t **argv)
@@ -8494,10 +8740,7 @@ extern "C" {
         //AddVectoredExceptionHandler(1, CBaseException::UnhandledExceptionFilter);
         //SET_DEFULTER_HANDLER();
 #endif
-        std::set_new_handler([]() {
-            int *a = nullptr;
-            *a     = 0;
-            });
+        std::set_new_handler(bbl_out_of_memory_handler);
         // Call the UTF8 main.
         return CLI().run(argc, argv_ptrs.data());
     }
@@ -8505,6 +8748,7 @@ extern "C" {
 #else /* _MSC_VER */
 int main(int argc, char **argv)
 {
+    std::set_new_handler(bbl_out_of_memory_handler);
     return CLI().run(argc, argv);
 }
 #endif /* _MSC_VER */

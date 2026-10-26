@@ -7,6 +7,7 @@
 #include <wx/webviewarchivehandler.h>
 #include <wx/webviewfshandler.h>
 #include <wx/dynlib.h>
+#include <wx/utils.h>
 #if wxUSE_WEBVIEW_EDGE
 #include <wx/msw/webview_edge.h>
 #elif defined(__WXMAC__)
@@ -19,12 +20,34 @@
 
 #ifdef __WIN32__
 #include <WebView2.h>
+#include <wrl/client.h>
+#include <wrl/event.h>
 #elif defined __linux__
 #include <gtk/gtk.h>
 #define WEBKIT_API
 struct WebKitWebView;
+#if defined(BBL_WEBKITGTK_4_1)
+struct _JSCValue;
+typedef struct _JSCValue JSCValue;
+#else
 struct WebKitJavascriptResult;
+#endif
 extern "C" {
+#if defined(BBL_WEBKITGTK_4_1)
+WEBKIT_API void
+webkit_web_view_evaluate_javascript                  (WebKitWebView             *web_view,
+                                                      const gchar               *script,
+                                                      gssize                     length,
+                                                      const gchar               *world_name,
+                                                      const gchar               *source_uri,
+                                                      GCancellable              *cancellable,
+                                                      GAsyncReadyCallback       callback,
+                                                      gpointer                  user_data);
+WEBKIT_API JSCValue *
+webkit_web_view_evaluate_javascript_finish           (WebKitWebView             *web_view,
+                                                      GAsyncResult              *result,
+                                                      GError                    **error);
+#else
 WEBKIT_API void
 webkit_web_view_run_javascript                       (WebKitWebView             *web_view,
                                                       const gchar               *script,
@@ -34,9 +57,10 @@ webkit_web_view_run_javascript                       (WebKitWebView             
 WEBKIT_API WebKitJavascriptResult *
 webkit_web_view_run_javascript_finish                (WebKitWebView             *web_view,
                                                       GAsyncResult              *result,
-						      GError                    **error);
+                                                      GError                    **error);
 WEBKIT_API void
-webkit_javascript_result_unref              (WebKitJavascriptResult *js_result);
+webkit_javascript_result_unref                       (WebKitJavascriptResult    *js_result);
+#endif
 }
 
 static GOnce register_handler_once = G_ONCE_INIT;
@@ -55,6 +79,36 @@ register_webview_handler(gpointer data)
 #endif
 
 #ifdef __WIN32__
+
+namespace {
+
+void enable_default_webview2_cdp_for_internal_builds()
+{
+#if !BBL_RELEASE_TO_PUBLIC
+    wxString existing;
+    if (wxGetEnv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", &existing) && !existing.empty())
+        return;
+
+    wxSetEnv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+             "--remote-debugging-port=9222 --remote-allow-origins=*");
+#endif
+}
+
+// Cookie name to clear and the domain substring it must belong to on logout.
+constexpr wchar_t kLogoutCookieName[]   = L"token";
+constexpr wchar_t kLogoutCookieDomain[] = L"bambulab";
+
+bool domain_matches_bambulab(LPCWSTR domain)
+{
+    if (!domain)
+        return false;
+    std::wstring lower(domain);
+    for (wchar_t &c : lower)
+        c = towlower(c);
+    return lower.find(kLogoutCookieDomain) != std::wstring::npos;
+}
+
+} // namespace
 
 class WebViewEdge : public wxWebViewEdge
 {
@@ -195,6 +249,12 @@ public:
         assert(iter != g_webviews.end());
         if (iter != g_webviews.end())
             g_webviews.erase(iter);
+        // Also drop it from the delayed list so a pending flush of g_delay_webviews
+        // never calls AddScriptMessageHandler() on an already-destroyed view.
+        // See bambulab/BambuStudio #11004 and #10968.
+        auto diter = std::find(g_delay_webviews.begin(), g_delay_webviews.end(), m_webView);
+        if (diter != g_delay_webviews.end())
+            g_delay_webviews.erase(diter);
     }
     wxWebView *m_webView;
 };
@@ -235,7 +295,42 @@ wxString WebView::BuildEdgeUserDataPath()
 #endif
 }
 
-wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
+void on_webview_evt(wxWebView *webview)
+{
+    webview->Bind(wxEVT_WEBVIEW_NAVIGATING, [webview](wxWebViewEvent &e) {
+        wxLogMessage("NAVIGATING: %s", e.GetURL());
+        BOOST_LOG_TRIVIAL(info) << webview->GetName() << " [WebView] navigating " << e.GetURL();
+        e.Skip();
+    });
+
+    webview->Bind(wxEVT_WEBVIEW_NAVIGATED, [webview](wxWebViewEvent &e) {
+        BOOST_LOG_TRIVIAL(info) << webview->GetName() << " [WebView] navigated: " << e.GetURL();
+        e.Skip();
+    });
+
+    webview->Bind(wxEVT_WEBVIEW_LOADED, [webview](wxWebViewEvent &e) {
+        BOOST_LOG_TRIVIAL(info) << webview->GetName() << " [WebView] loaded: " << e.GetURL();
+        e.Skip();
+    });
+
+    webview->Bind(wxEVT_WEBVIEW_ERROR, [webview](wxWebViewEvent &e) {
+        BOOST_LOG_TRIVIAL(info) << webview->GetName()
+                                << wxString::Format(" [WebView] error: url=%s, code=%d, description=%s", e.GetURL(), static_cast<int>(e.GetInt()), e.GetString().utf8_string());
+        e.Skip();
+    });
+
+    webview->Bind(wxEVT_WEBVIEW_TITLE_CHANGED, [webview](wxWebViewEvent &e) {
+        BOOST_LOG_TRIVIAL(info) << webview->GetName() << wxString::Format(" [WebView] title changed: %s", e.GetString().utf8_string());
+        e.Skip();
+    });
+
+    webview->Bind(wxEVT_WEBVIEW_NEWWINDOW, [webview](wxWebViewEvent &e) {
+        BOOST_LOG_TRIVIAL(info) << webview->GetName() << wxString::Format(" [WebView] new window: %s", e.GetString());
+        e.Skip();
+    });
+}
+
+wxWebView *WebView::CreateWebView(wxWindow *parent, wxString const &url, wxString const &name)
 {
 #if wxUSE_WEBVIEW_EDGE
     // Check if a fixed version of edge is present in
@@ -247,6 +342,10 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
         wxWebViewEdge::MSWSetBrowserExecutableDir(edgeFixedDir.GetFullPath());
         wxLogMessage("Using fixed edge version");
     }
+
+    if(!wxWebView::IsBackendAvailable(wxWebViewBackendEdge)) {
+        BOOST_LOG_TRIVIAL(warning) << "WebView2 runtime is not available. WebView based features may not work properly";
+    }
 #endif
     auto url2  = url;
 #ifdef __WIN32__
@@ -256,6 +355,8 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
     //BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << ": " << url2.ToUTF8();
 
 #ifdef __WIN32__
+    enable_default_webview2_cdp_for_internal_builds();
+
     wxWebView* webView = new WebViewEdge;
     webView->SetUserDataPathOption(BuildEdgeUserDataPath());
 #elif defined(__WXOSX__)
@@ -264,6 +365,8 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
     auto webView = wxWebView::New();
 #endif
     if (webView) {
+        on_webview_evt(webView);
+
         webView->SetBackgroundColour(StateColor::darkModeColorFor(*wxWHITE));
 
         wxString language_code = Slic3r::GUI::wxGetApp().current_language_code().BeforeFirst('_');
@@ -273,6 +376,7 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
                                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 Edg/107.0.1418.52 BBL-Slicer/v%s (%s) BBL-Language/%s",
                                                SLIC3R_VERSION, Slic3r::GUI::wxGetApp().dark_mode() ? "dark" : "light", language_code.mb_str()));
         webView->Create(parent, wxID_ANY, url2, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+        if (!name.empty()) webView->SetName(name);
         // We register the wxfs:// protocol for testing purposes
         webView->RegisterHandler(wxSharedPtr<wxWebViewHandler>(new wxWebViewArchiveHandler("bbl")));
         // And the memory: file system
@@ -304,21 +408,39 @@ wxWebView* WebView::CreateWebView(wxWindow * parent, wxString const & url)
         };
 #ifndef __WIN32__
         webView->CallAfter([webView, addScriptMessageHandler] {
+            // This async callback may fire after webView has already been destroyed,
+            // which would call AddScriptMessageHandler() on a dangling pointer
+            // (use-after-free -> pointer-authentication crash on Apple Silicon, or a
+            // long hang during startup on macOS 26.5+). g_webviews lists every live
+            // view, so bail out if this one is already gone.
+            // See bambulab/BambuStudio #11004 and #10968.
+            if (std::find(g_webviews.begin(), g_webviews.end(), webView) == g_webviews.end())
+                return;
 #endif
             if (Slic3r::GUI::wxGetApp().is_adding_script_handler()) {
                 g_delay_webviews.push_back(webView);
             } else {
                 addScriptMessageHandler(webView);
+                // AddScriptMessageHandler pumps a nested event loop (RunScriptSync ->
+                // wxYieldFor). While the adding-flag is set, other webviews' deferred
+                // CallAfter lambdas dispatched by that nested loop take the guarded
+                // branch above and queue themselves here, so drain them now. Any webview
+                // torn down while queued (e.g. a language-switch GUI rebuild) is skipped:
+                // ~WebViewRef removes it from g_webviews, so the find() below filters it
+                // out instead of dereferencing freed memory.
                 while (!g_delay_webviews.empty()) {
-                    auto views = std::move(g_delay_webviews);
-                    for (auto wv : views)
-                        addScriptMessageHandler(wv);
+                    auto wv = g_delay_webviews.front();
+                    g_delay_webviews.erase(g_delay_webviews.begin());
+                    if (std::find(g_webviews.begin(), g_webviews.end(), wv) == g_webviews.end()) continue;
+                    addScriptMessageHandler(wv);
                 }
             }
 #ifndef __WIN32__
         });
 #endif
-        webView->EnableContextMenu(false);
+        const bool enable_devtools = Slic3r::GUI::wxGetApp().app_config && Slic3r::GUI::wxGetApp().app_config->get("enable_webview_devtools") == "true";
+        webView->EnableContextMenu(enable_devtools);
+        webView->EnableAccessToDevTools(enable_devtools);
     } else {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": failed. Use fake web view.";
         webView = new FakeWebView;
@@ -357,6 +479,19 @@ bool WebView::RunScript(wxWebView *webView, wxString const &javascript)
         return true;
 #else
         WebKitWebView *wkWebView = (WebKitWebView *) webView->GetNativeBackend();
+#if defined(BBL_WEBKITGTK_4_1)
+        webkit_web_view_evaluate_javascript(
+            wkWebView, javascript.utf8_str(), -1, NULL, NULL, NULL,
+            [](GObject *wkWebView, GAsyncResult *res, void *) {
+                GError *error = NULL;
+                JSCValue *result = webkit_web_view_evaluate_javascript_finish((WebKitWebView*)wkWebView, res, &error);
+                if (!result) {
+                    if (error) g_error_free(error);
+                } else {
+                    g_object_unref(result);
+                }
+        }, NULL);
+#else
         webkit_web_view_run_javascript(
             wkWebView, javascript.utf8_str(), NULL,
             [](GObject *wkWebView, GAsyncResult *res, void *) {
@@ -367,11 +502,105 @@ bool WebView::RunScript(wxWebView *webView, wxString const &javascript)
                 else
                     webkit_javascript_result_unref (result);
         }, NULL);
+#endif
         return true;
 #endif
     } catch (std::exception &/*e*/) {
         return false;
     }
+}
+
+// Single source of truth for "the active webview backend is CEF/libcef".
+// libcef is built and shipped cross-platform, so when it is enabled BOTH the
+// Windows (WebView2) and macOS (WebKit) cookie paths must be bypassed in favour
+// of the CEF path below. Map this to the real build flag once libcef lands
+// (e.g. wxUSE_WEBVIEW_CHROMIUM or a dedicated define).
+#ifndef BBL_WEBVIEW_USE_CEF
+#  if defined(wxUSE_WEBVIEW_CHROMIUM) && wxUSE_WEBVIEW_CHROMIUM
+#    define BBL_WEBVIEW_USE_CEF 1
+#  else
+#    define BBL_WEBVIEW_USE_CEF 0
+#  endif
+#endif
+
+void WebView::ClearBambulabTokenCookies()
+{
+    // Dispatch on the active webview backend, not the platform: the cookie store
+    // is owned by the backend (WebView2 / WebKit / CEF), so a future backend
+    // switch must land in the matching branch instead of mis-casting the native
+    // pointer returned by GetNativeBackend().
+#if BBL_WEBVIEW_USE_CEF
+    // CEF/Chromium backend (Windows + macOS): cookies live in Chromium's network
+    // context, reachable via CefCookieManager::GetGlobalManager()->
+    // VisitAllCookies(visitor); the visitor sets its deleteCookie out-param for
+    // name=="token" on domains that contain "bambulab". Wire this up once the
+    // libcef headers are part of the build.
+    BOOST_LOG_TRIVIAL(warning)
+        << "WebView: ClearBambulabTokenCookies not yet implemented for the Chromium/CEF backend";
+#elif defined(__WIN32__) && wxUSE_WEBVIEW_EDGE
+    using Microsoft::WRL::ComPtr;
+    using Microsoft::WRL::Callback;
+
+    // Every WebView created via CreateWebView shares one WebView2 profile/cookie
+    // store, so clearing through any live backend covers all of them.
+    ICoreWebView2 *backend = nullptr;
+    for (wxWebView *webView : g_webviews) {
+        if (webView && (backend = static_cast<ICoreWebView2 *>(webView->GetNativeBackend())))
+            break;
+    }
+    if (!backend) {
+        BOOST_LOG_TRIVIAL(warning) << "WebView: ClearBambulabTokenCookies skipped, no WebView2 backend ready";
+        return;
+    }
+
+    ComPtr<ICoreWebView2_2> webView2_2;
+    if (FAILED(backend->QueryInterface(IID_PPV_ARGS(&webView2_2))) || !webView2_2) {
+        BOOST_LOG_TRIVIAL(warning) << "WebView: ClearBambulabTokenCookies failed to get ICoreWebView2_2";
+        return;
+    }
+
+    ComPtr<ICoreWebView2CookieManager> cookieManager;
+    if (FAILED(webView2_2->get_CookieManager(&cookieManager)) || !cookieManager)
+        return;
+
+    // nullptr uri => enumerate all cookies; capturing cookieManager keeps it alive
+    // until the async handler runs. WRL handles the handler's lifetime/refcount.
+    cookieManager->GetCookies(
+        nullptr,
+        Callback<ICoreWebView2GetCookiesCompletedHandler>(
+            [cookieManager](HRESULT result, ICoreWebView2CookieList *list) -> HRESULT {
+                if (FAILED(result) || !list)
+                    return S_OK;
+                UINT count = 0;
+                list->get_Count(&count);
+                for (UINT i = 0; i < count; ++i) {
+                    ComPtr<ICoreWebView2Cookie> cookie;
+                    if (FAILED(list->GetValueAtIndex(i, &cookie)) || !cookie)
+                        continue;
+                    LPWSTR name = nullptr, domain = nullptr;
+                    cookie->get_Name(&name);
+                    cookie->get_Domain(&domain);
+                    if (name && wcscmp(name, kLogoutCookieName) == 0 && domain_matches_bambulab(domain)) {
+                        cookieManager->DeleteCookie(cookie.Get());
+                        BOOST_LOG_TRIVIAL(info) << "WebView: cleared bambulab token cookie";
+                    }
+                    CoTaskMemFree(name);
+                    CoTaskMemFree(domain);
+                }
+                return S_OK;
+            })
+            .Get());
+#elif defined(__WXOSX__)
+    // Native WebKit backend only. Under a macOS CEF build this branch is skipped
+    // because BBL_WEBVIEW_USE_CEF wins above; WKWebsiteDataStore does not own the
+    // CEF cookie store, so it must not run there.
+    // wxWebView WebKit uses the default WKWebsiteDataStore; cookies are process-wide.
+    Slic3r::GUI::WKWebView_clearBambulabTokenCookies();
+    BOOST_LOG_TRIVIAL(info) << "WebView: requested bambulab token cookie cleanup (WebKit)";
+#else
+    BOOST_LOG_TRIVIAL(warning)
+        << "WebView: ClearBambulabTokenCookies has no implementation for the active webview backend";
+#endif
 }
 
 void WebView::RecreateAll()

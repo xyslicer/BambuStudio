@@ -96,6 +96,7 @@ class MainFrame : public DPIFrame
 #endif
     bool     m_loaded {false};
     wxTimer* m_reset_title_text_colour_timer{ nullptr };
+    wxString m_title_cache;  // last value applied by update_title(), avoids redundant SetTitle
 
     wxString    m_qs_last_input_file = wxEmptyString;
     wxString    m_qs_last_output_file = wxEmptyString;
@@ -134,6 +135,8 @@ class MainFrame : public DPIFrame
     //bool can_eject() const;
     bool can_slice() const;
     bool can_change_view() const;
+    bool can_toggle_camera_fullscreen() const;
+    void toggle_camera_fullscreen();
     bool can_select() const;
     bool can_deselect() const;
     bool can_clone() const;
@@ -422,6 +425,8 @@ public:
     //BBS
     void update_side_button_style();
     void update_slice_print_status(SlicePrintEventType event, bool can_slice = true, bool can_print = true);
+    void update_helio_button_state();
+
 
     int select_device_page_count{ 0 };
 

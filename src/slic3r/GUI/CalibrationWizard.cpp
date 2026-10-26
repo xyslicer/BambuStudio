@@ -395,6 +395,9 @@ void CalibrationWizard::cache_preset_info(MachineObject *obj, float nozzle_dia, 
     obj->GetCalib()->ResetSelectedCalibPreset();
     std::vector<CaliPresetInfo> cali_preset;
     for (auto& item : selected_filaments) {
+        if (!item.filament_preset)
+            continue;
+
         CaliPresetInfo result;
         result.tray_id          = item.tray_id;
         result.nozzle_diameter  = nozzle_dia;
@@ -1564,8 +1567,7 @@ std::map<std::string, ConfigIndexValue> FlowRateWizard::generate_index_key_value
     int  index = 0;
     if (!selected_filaments.empty()) {
         TrayInfo tray_info = selected_filaments.begin()->second;
-        // todo multi_extruder: get_extruder_type from obj
-        ExtruderType extruder_type = ExtruderType::etDirectDrive;
+        ExtruderType extruder_type = CalibUtils::get_extruder_type(obj, tray_info.extruder_id);
         index = get_index_for_extruder_parameter(tray_info.preset->config, "filament_flow_ratio", tray_info.extruder_id, extruder_type, tray_info.nozzle_volume_type);
         ConfigIndexValue config_value;
         config_value.index = index;

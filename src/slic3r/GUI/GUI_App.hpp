@@ -26,8 +26,10 @@
 #include "slic3r/GUI/UnsavedChangesDialog.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "slic3r/GUI/GLEnums.hpp"
+#include "slic3r/Utils/VersionPolicyManager.hpp"
 
 #include <wx/app.h>
+#include <wx/timer.h>
 #include <wx/colour.h>
 #include <wx/font.h>
 #include <wx/string.h>
@@ -270,6 +272,20 @@ private:
     bool            m_app_conf_exists{ false };
     EAppMode        m_app_mode{ EAppMode::Editor };
     bool            m_is_recreating_gui{ false };
+#if defined(__WXOSX__)
+    // STUDIO-18472: after the Filament Manager WKWebView has churned (tab visit +
+    // language-switch GUI rebuilds) macOS stops reliably waking the run loop to
+    // dispatch wx pending events (wxQueueEvent / wxPostEvent). This strands
+    // deferred actions: the post-rebuild project restore (blank prepare canvas)
+    // and the top tab-bar page switches (ButtonsListCtrl posts the selection via
+    // wxPostEvent -> tab clicks appear dead) until some unrelated wakeup occurs.
+    // A wxTimer is backed by a CFRunLoopTimer that fires regardless of run-loop
+    // state, so we use it to drain the pending-event queue ourselves. Armed once
+    // a rebuild has happened and left running for the session; the
+    // HasPendingEvents() guard keeps the idle cost negligible.
+    wxTimer         m_macos_pending_pump_timer;
+    void            on_macos_pending_pump(wxTimerEvent& evt);
+#endif
 #ifdef __linux__
     bool            m_opengl_initialized{ false };
 #endif
@@ -330,6 +346,7 @@ private:
     wgtFilaManagerCloudClient*      m_fila_manager_cloud_client { nullptr };
     wgtFilaManagerCloudSync*        m_fila_manager_cloud_sync   { nullptr };
     wgtFilaManagerCloudDispatcher*  m_fila_manager_cloud_disp   { nullptr };
+    bool                            m_disable_fila_manager      { false };
     std::vector<std::string> need_delete_presets;   // store setting ids of preset
     std::vector<bool> m_create_preset_blocked { false, false, false, false, false, false }; // excceed limit
     bool m_networking_compatible { false };
@@ -380,6 +397,10 @@ public:
 
     bool get_app_conf_exists() { return m_app_conf_exists; }
     void show_message_box(std::string msg) { wxMessageBox(msg); }
+    // BBS: warn before a mesh-rebuilding op (repair/simplify/smooth/boolean) that
+    // painting is transferred by best-effort approximation and may be imperfect.
+    // Returns true if the user chooses to continue.
+    bool confirm_mesh_paint_warning();
     EAppMode get_app_mode() const { return m_app_mode; }
     Slic3r::DeviceManager* getDeviceManager() { return m_device_manager; }
     bool                   is_blocking_printing(MachineObject *obj_ = nullptr);
@@ -389,6 +410,7 @@ public:
     wgtFilaManagerCloudClient*      fila_manager_cloud_client() { return m_fila_manager_cloud_client; }
     wgtFilaManagerCloudSync*        fila_manager_cloud_sync()   { return m_fila_manager_cloud_sync; }
     wgtFilaManagerCloudDispatcher*  fila_manager_cloud_disp()   { return m_fila_manager_cloud_disp; }
+    bool                            is_fila_manager_disabled() const { return m_disable_fila_manager; }
 #if !BBL_RELEASE_TO_PUBLIC
     void set_fila_debug_sink(std::function<void(const nlohmann::json&)> sink)
     {
@@ -506,6 +528,7 @@ public:
     void            request_login(bool show_user_info = false);
     bool            check_login();
     void            get_login_info();
+    void            sync_left_server_connect_status();
     bool            is_user_login();
 
     void            request_user_login(int online_login = 0);
@@ -539,7 +562,7 @@ public:
     void            check_new_version(bool show_tips = false, int by_user = 0);
     void            check_cert();
     bool            process_network_msg(std::string dev_id, std::string msg);
-    void            check_beta_version();
+    void            check_beta_version(bool show_tips_when_no_beta = false);
     void            request_new_version(int by_user);
     void            enter_force_upgrade();
     void            set_skip_version(bool skip = true);
@@ -565,12 +588,67 @@ public:
     void            report_consent(std::string expand);
     void            check_track_enable();
 
+    /**
+     * @brief Asks the cloud version policy about a check point.
+     *
+     * Only answers what the policy says. Showing a VersionPolicyDialog and
+     * deciding what its buttons do is left to the caller, since what a hit
+     * means differs per check point.
+     *
+     * @param point Check point to evaluate.
+     * @return The hits, if any. An empty result means the caller may carry on
+     *         silently, which is also what any failure below resolves to.
+     * @note Does not throw and performs no network I/O.
+     */
+    PolicyCheckResult check_version_policy(PolicyCheckPoint point);
+
+    /**
+     * @brief Shows the policy that matched at startup, if any.
+     *
+     * Quits the application on a block: such a version must not reach the
+     * workspace at all.
+     */
+    void            check_startup_version_policy();
+
+    /**
+     * @brief Shows the policy that guards slicing, if any.
+     *
+     * Call it on an explicit slice request, before any slicing work starts.
+     *
+     * @return true when slicing may go ahead: nothing matched, or the user
+     *         chose to continue through a warning. A block always returns false.
+     */
+    bool            check_slice_version_policy();
+
+    /**
+     * @brief Silent (no dialog) test of whether the current version is hard-blocked
+     *        from slicing by the cloud policy.
+     *
+     * Use it to short-circuit expensive pre-slice work (AMS sync checks, first-time
+     * tutorial popups) without raising the policy dialog. The single user-facing
+     * dialog is still raised by check_slice_version_policy() at the actual slice.
+     *
+     * @return true only when a BeforeSlice policy of severity "block" matches; a
+     *         warning-only match or no match returns false.
+     */
+    bool            is_slice_version_blocked();
+
+    /**
+     * @brief Shows the policy that guards printing, if any.
+     *
+     * Call it right before the send to printer dialog would come up.
+     *
+     * @return true when the dialog may come up: nothing matched, or the user
+     *         chose to continue through a warning. A block always returns false.
+     */
+    bool            check_send_print_version_policy();
+
     static bool     catch_error(std::function<void()> cb, const std::string& err);
 
     //for helio slice
     bool            is_helio_enable();
     static void     request_helio_pat(std::function<void(std::string)> func);
-    static void     request_helio_supported_data();
+    static void     request_helio_supported_data(bool force_refresh = false);
 	//static std::vector<Slic3r::HelioQuery::SupportedPrinters> get_helio_support_printer_model();
 
     void                                               persist_window_geometry(wxTopLevelWindow *window, bool default_maximized = false);
@@ -618,7 +696,7 @@ public:
     wxString 		current_language_code_safe() const;
     bool            is_localized() const { return m_wxLocale->GetLocale() != "English"; }
 
-    void            open_preferences(size_t open_on_tab = 0, const std::string& highlight_option = std::string());
+    void            open_preferences();
 
     void            report_consent_common(bool agree, std::string scene, std::string formID);
     virtual bool OnExceptionInMainLoop();
@@ -650,6 +728,7 @@ public:
     PingCodeBindDialog* m_ping_code_binding_dialog{ nullptr };
 
     NetworkErrorDialog* m_server_error_dialog { nullptr };
+    bool            m_homepage_server_connect_failed { false };
 
     void            set_download_model_url(std::string url) {m_mall_model_download_url = url;}
     void            set_download_model_name(std::string name) {m_mall_model_download_name = name;}
@@ -759,6 +838,11 @@ public:
 
     void update_log_sink_region();
 
+    // Apply a "severity_level" string (fatal/error/warning/info/debug/trace) to
+    // both the Boost.Log and wx logging verbosity, keeping them in sync. Single
+    // entry point used at init and by the preference combobox.
+    void set_severity_level(const std::string &level);
+
 private:
     int             updating_bambu_networking();
     bool            on_init_inner();
@@ -814,6 +898,7 @@ bool has_filaments(const std::vector<string>& model_filaments);
 static std::vector<wxLanguage> s_supported_languages = {
     wxLANGUAGE_ENGLISH,
     wxLANGUAGE_CHINESE_SIMPLIFIED,
+    wxLANGUAGE_CHINESE_TRADITIONAL,
     wxLANGUAGE_GERMAN,
     wxLANGUAGE_FRENCH,
     wxLANGUAGE_SPANISH,

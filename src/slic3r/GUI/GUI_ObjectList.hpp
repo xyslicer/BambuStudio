@@ -24,10 +24,12 @@ class MenuWithSeparators;
 namespace Slic3r {
 class ConfigOptionsGroup;
 class DynamicPrintConfig;
+class Model;
 class ModelConfig;
 class ModelObject;
 class ModelVolume;
 class TriangleMesh;
+class GLVolume;
 struct TextInfo;
 enum class ModelVolumeType : int;
 
@@ -46,6 +48,8 @@ struct ObjectVolumeID {
     ModelObject* object{ nullptr };
     ModelVolume* volume{ nullptr };
 };
+
+class Selection;
 
 typedef Event<ObjectVolumeID> ObjectSettingEvent;
 
@@ -82,6 +86,17 @@ struct MeshErrorsInfo
 {
     wxString    tooltip;
     std::string warning_icon_name;
+};
+
+struct MeshIssueCounts
+{
+    int non_manifold_edges    = 0;
+    int non_manifold_vertices = 0;
+    int open_edges            = 0;
+
+    bool has_error() const { return non_manifold_edges > 0 || non_manifold_vertices > 0; }
+    bool has_info() const { return open_edges > 0; }
+    bool has_any_issue() const { return has_error() || has_info(); }
 };
 
 class ObjectList : public wxDataViewCtrl
@@ -240,6 +255,12 @@ public:
     // update changed name in the object model
     void                update_name_in_model(const wxDataViewItem& item) const;
     void                update_name_in_list(int obj_idx, int vol_idx) const;
+    // Refresh a list item's displayed name from the model, without relying on the
+    // current selection (vol_idx < 0 targets the object row).
+    void                sync_name_from_model(int obj_idx, int vol_idx);
+    // Refresh filament-column numbers/icons from ModelObject/ModelVolume config
+    // (no config rewrite). Used after assembly-view filament edits are written back.
+    void                sync_filament_from_model();
     void                update_filament_values_for_items(const size_t filaments_count);
     void                update_filament_values_for_items_when_delete_filament(const size_t filament_id, const int replace_id = -1);
 
@@ -256,8 +277,8 @@ public:
     // Return value is a pair <Tooltip, warning_icon_name>, used for the tooltip and related warning icon
     // Function without parameters is for a call from Manipulation panel,
     // when we don't know parameters of selected item
-    MeshErrorsInfo      get_mesh_errors_info(const int obj_idx, const int vol_idx = -1, wxString* sidebar_info = nullptr, int* non_manifold_edges = nullptr) const;
-    MeshErrorsInfo      get_mesh_errors_info(wxString* sidebar_info = nullptr, int* non_manifold_edges = nullptr);
+    MeshErrorsInfo      get_mesh_errors_info(const int obj_idx, const int vol_idx = -1, wxString* sidebar_info = nullptr, MeshIssueCounts* issue_counts = nullptr) const;
+    MeshErrorsInfo      get_mesh_errors_info(wxString* sidebar_info = nullptr, MeshIssueCounts* issue_counts = nullptr);
     void                set_tooltip_for_item(const wxPoint& pt);
 
     void                selection_changed();
@@ -304,8 +325,16 @@ public:
     bool                del_from_cut_object(bool is_connector, bool is_model_part = false, bool is_negative_volume = false);
     bool                del_subobject_from_object(const int obj_idx, const int idx, const int type);
     void                del_info_item(const int obj_idx, InfoItemType type);
-    void                split();
+    void                split(bool ignore_warning = false);
+    // Split every selected whole object into objects, reusing the single-object "To objects" path.
+    void                split_objects();
+    // Enabled when at least two objects are selected and at least one of them is splittable to objects.
+    bool                can_split_objects();
+    // Distinct whole-object indices in the current selection (volume / instance sub-items ignored).
+    std::vector<int>    selected_object_idxs() const;
     void                merge(bool to_multipart_object);
+    // Merge the given whole objects (indices into the plater model) into one multipart object.
+    void                merge_objects(const std::vector<size_t>& obj_idxs);
     void                merge_volumes(); // BBS: merge parts to single part
     void                layers_editing();
 
@@ -473,6 +502,11 @@ public:
     void selected_object(ObjectDataViewModelNode* item);
 
 private:
+    // Map assembly-canvas (object_idx, volume_idx) to the prepare model via part_guid /
+    // assembly_src_guid. On success overwrites obj_idx / vol_idx and returns true.
+    bool resolve_prepare_object_volume_idx(int& obj_idx, int& vol_idx, const GLVolume* assembly_gl_volume,
+                                           const Model& assemble_model, Selection& prepare_selection) const;
+
 #ifdef __WXOSX__
 //    void OnChar(wxKeyEvent& event);
     wxAcceleratorTable m_accel;

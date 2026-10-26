@@ -50,6 +50,7 @@ namespace GUI {
 // Previous definitions
 class MessageDialog;
 class wgtDeviceNozzleRack;
+class CameraFullscreenFrame;
 
 enum CameraRecordingStatus {
     RECORDING_NONE,
@@ -307,6 +308,7 @@ private:
     Label*          m_staticText_finish_time;
     RectTextPanel*  m_staticText_finish_day;
     wxStaticText*   m_staticText_layers;
+    wxStaticText*   m_staticTextPauses;
     wxStaticText *  m_has_rated_prompt;
     wxStaticText *  m_request_failed_info;
     wxStaticBitmap* m_bitmap_thumbnail;
@@ -344,8 +346,8 @@ private:
 public:
     void init_bitmaps();
     void init_scaled_buttons();
-    void error_info_reset();
-    void show_error_msg(wxString msg);
+    bool error_info_reset();
+    void show_error_msg(const wxString &msg);
     void reset_printing_value();
     void msw_rescale();
 
@@ -367,6 +369,8 @@ public:
     void update_left_time(int mc_left_time);
     void show_layers_num(bool show) { m_staticText_layers->Show(show); }
     void update_layers_num(bool show, wxString num = wxEmptyString);
+    void updatePauseNum(bool show, wxString num = wxEmptyString);
+    void updatePauseMarkers(const DevPrintPauseList *pauseList, int printRemainingTime = 0);
     void show_priting_use_info(bool show, wxString time = wxEmptyString, wxString weight = wxEmptyString);
     void show_profile_info(bool show, wxString profile = wxEmptyString);
     void set_thumbnail_img(const wxBitmap& bmp, const std::string& bmp_name);
@@ -396,6 +400,7 @@ public:
     void                           set_has_reted_text(bool has_rated);
 
 private:
+    void refreshErrorContents();
     void paint(wxPaintEvent&);
 };
 
@@ -427,8 +432,11 @@ protected:
     CameraRecordingStatus m_state_recording{CameraRecordingStatus::RECORDING_NONE};
     CameraTimelapseStatus m_state_timelapse{CameraTimelapseStatus::TIMELAPSE_NONE};
 
-
     CameraItem *m_setting_button;
+    CameraItem *m_camera_fullscreen_button{ nullptr };
+    wxBoxSizer *m_camera_media_sizer{ nullptr };
+    CameraFullscreenFrame *m_camera_fullscreen_frame{ nullptr };
+    wxPanel *m_camera_placeholder{ nullptr };
 
     wxBitmap m_bitmap_camera;
     ScalableBitmap m_bitmap_sdcard_state_normal;
@@ -629,10 +637,16 @@ public:
 
     void jump_to_Rack();
 
+    bool can_show_camera_fullscreen() const;
+    bool is_camera_fullscreen() const;
+    void toggle_camera_fullscreen();
+    void close_camera_fullscreen();
+    void on_camera_fullscreen(wxMouseEvent& event);
+
 private:
     void on_ams_rack_switch(wxCommandEvent& event);
+    void show_camera_fullscreen();
 };
-
 
 class StatusPanel : public StatusBasePanel
 {
@@ -650,6 +664,7 @@ protected:
     SafetyOptionsDialog* safety_options_dlg { nullptr };
     CalibrationDialog*   calibration_dlg {nullptr};
     AMSMaterialsSetting *m_filament_setting_dlg{nullptr};
+    AMSNewOfficialFilamentDlg *m_new_official_filament_dlg{nullptr};
 
     DeviceErrorDialog* m_print_error_dlg = nullptr;
     SecondaryCheckDialog* abort_dlg = nullptr;
@@ -708,6 +723,7 @@ protected:
     void on_subtask_abort(wxCommandEvent &event);
     void on_print_error_clean(wxCommandEvent &event);
     void error_info_reset();
+    void refreshProjectTaskLayout();
     void show_recenter_dialog();
 
     /* axis control */
@@ -741,6 +757,7 @@ protected:
     void on_ams_filament_backup(SimpleEvent& event);
     void on_ams_setting_click(SimpleEvent& event);
     void on_filament_edit(wxCommandEvent &event);
+    void on_new_official_filament_hint(wxCommandEvent &event);
     void on_ext_spool_edit(wxCommandEvent &event);
     void on_filament_extrusion_cali(wxCommandEvent &event);
     void on_ams_refresh_rfid(wxCommandEvent &event);
@@ -758,7 +775,7 @@ protected:
     void on_thumbnail_enter(wxMouseEvent &event);
     void on_thumbnail_leave(wxMouseEvent &event);
     void refresh_thumbnail_webrequest(wxMouseEvent& event);
-    void on_switch_vcamera(wxMouseEvent &event);
+    void on_switch_vcamera(wxCommandEvent &event);
     void on_camera_enter(wxMouseEvent &event);
     void on_camera_leave(wxMouseEvent& event);
 
@@ -814,6 +831,7 @@ protected:
 
 public:
     void update_error_message();
+    void set_ams_new_filament_hint(const std::string& ams_id, const std::string& slot_id, bool show);
 
 public:
     StatusPanel(wxWindow *      parent,

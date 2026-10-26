@@ -7,10 +7,15 @@
 #include "slic3r/GUI/GLToolbar.hpp"
 #include "slic3r/GUI/DeviceCore/DevUtilBackend.h"
 #include "../DeviceCore/DevConfigUtil.h"
+#include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/GCode/BedExcludeChecker.hpp"
+#include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/Print.hpp"
 #include "../Utils/HelioDragon.hpp"
 #include <imgui/imgui_internal.h>
 #include <GL/glew.h>
+#include <chrono>
 namespace
 {
     std::string get_view_type_string(Slic3r::GUI::gcode::EViewType view_type)
@@ -83,6 +88,12 @@ namespace
         return output;
     }
 
+    // Minimum extrusion segment length (mm) considered for the volumetric flow rate range.
+    // mm3_per_mm is reverse-computed as A_filament * (dE / dL) from quantized G-code values, so the
+    // relative error grows ~ (q_L/2)/dL. With 3-decimal X/Y output (q_L = 1e-3 mm), keeping the length
+    // term near 1% gives dL >= 0.0005 / 0.01 = 0.05 mm (the 5-decimal dE term adds a few tenths %).
+    // Shorter segments are noise-dominated and would inflate the legend max; scale if X/Y precision changes.
+    static constexpr float VOLUMETRIC_RATE_MIN_SEGMENT_LEN = 0.05f;
     // Round to a bin with minimum two digits resolution.
             // Equivalent to conversion to string with sprintf(buf, "%.2g", value) and conversion back to float, but faster.
     static float round_to_bin(const float value)
@@ -297,6 +308,60 @@ namespace Slic3r
             bool BaseRenderer::is_contained_in_bed() const
             {
                 return m_contained_in_bed;
+            }
+
+            void BaseRenderer::update_toolpath_outside_state(const GCodeProcessorResult& gcode_result, const BuildVolume& build_volume,
+                const std::vector<BoundingBoxf3>& exclude_bounding_box, Points&& pts)
+            {
+                //BBS: use convex_hull for toolpath outside check
+                m_contained_in_bed = build_volume.all_paths_inside(gcode_result, m_paths_bounding_box);
+                if (m_contained_in_bed) {
+                    // Runtime-only combined exclude areas for toolpath checks.
+                    // Keep config semantics intact: do not write back to bed_exclude_area.
+                    std::vector<Slic3r::Polygon> combined_exclude_area_for_toolpath_check;
+                    combined_exclude_area_for_toolpath_check.reserve(exclude_bounding_box.size() + 1);
+                    for (const BoundingBoxf3& exclude_bbox : exclude_bounding_box) {
+                        if (exclude_bbox.defined)
+                            combined_exclude_area_for_toolpath_check.emplace_back(exclude_bbox.polygon(true));
+                    }
+                    auto* plater = wxGetApp().plater();
+                    const bool enable_wrapping_detection = plater != nullptr && plater->get_enable_wrapping_detection();
+                    if (enable_wrapping_detection && gcode_result.wrapping_exclude_area.size() > 2) {
+                        Pointfs wrapping_exclude_area_for_toolpath_check = gcode_result.wrapping_exclude_area;
+                        if (plater != nullptr) {
+                            if (PartPlate* curr_plate = plater->get_partplate_list().get_curr_plate(); curr_plate != nullptr) {
+                                // Keep the wrapping area in the same scene coordinates as exclude_bounding_box.
+                                // PartPlate::set_shape() translates exclude areas by the current plate origin.
+                                const Vec3d plate_origin = curr_plate->get_origin();
+                                for (Vec2d& point : wrapping_exclude_area_for_toolpath_check) {
+                                    point(0) += plate_origin(0);
+                                    point(1) += plate_origin(1);
+                                }
+                            }
+                        }
+
+                        Slic3r::Polygon wrapping_exclude_polygon = Slic3r::Polygon::new_scale(wrapping_exclude_area_for_toolpath_check);
+                        if (wrapping_exclude_polygon.is_valid()) {
+                            combined_exclude_area_for_toolpath_check.emplace_back(std::move(wrapping_exclude_polygon));
+                        }
+                    }
+
+                    if (!combined_exclude_area_for_toolpath_check.empty() && !pts.empty()) {
+                        bool maybe_intersects_exclude_area = false;
+                        Slic3r::Polygon convex_hull_2d = Slic3r::Geometry::convex_hull(std::move(pts));
+                        for (const Slic3r::Polygon& exclude_polygon : combined_exclude_area_for_toolpath_check) {
+                            if (!intersection({ exclude_polygon }, { convex_hull_2d }).empty()) {
+                                maybe_intersects_exclude_area = true;
+                                break;
+                            }
+                        }
+                        if (maybe_intersects_exclude_area) {
+                            const bool exact_intersects = toolpath_intersects_bed_exclude_area_2d(gcode_result, combined_exclude_area_for_toolpath_check);
+                            m_contained_in_bed = !exact_intersects;
+                        }
+                    }
+                }
+                (const_cast<GCodeProcessorResult&>(gcode_result)).toolpath_outside = !m_contained_in_bed;
             }
 
             EViewType BaseRenderer::get_view_type() const
@@ -537,6 +602,20 @@ namespace Slic3r
                 std::vector<std::string> type_opt = print.config().option<ConfigOptionStrings>("filament_type")->values;
                 std::vector<unsigned char> support_filament_opt = print.config().option<ConfigOptionBools>("filament_is_support")->values;
                 for (auto extruder_id : m_extruder_ids) {
+                    // 防御：某些异常工程文件中 project_settings.config 的
+                    // filament_* 数组长度不一致 — filament_colour/type 可能为 N，但 filament_is_support
+                    // 等可能缺失或更短，按 extruder_id 索引会越界。任一数组覆盖不到当前 extruder_id 时跳过。
+                    if (extruder_id >= filament_maps.size()
+                        || extruder_id >= type_opt.size()
+                        || extruder_id >= color_opt.size()
+                        || extruder_id >= support_filament_opt.size()) {
+                        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << ": filament_* config arrays too short for extruder_id=" << int(extruder_id)
+                            << ", sizes=[map " << filament_maps.size()
+                            << ", type " << type_opt.size()
+                            << ", color " << color_opt.size()
+                            << ", is_support " << support_filament_opt.size() << "], skip";
+                        continue;
+                    }
                     if (filament_maps[extruder_id] == 1) {
                         m_left_extruder_filament.push_back({ type_opt[extruder_id], color_opt[extruder_id], extruder_id, (bool)(support_filament_opt[extruder_id]) });
                     }
@@ -696,6 +775,8 @@ namespace Slic3r
                 ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, ImVec4(0.42f, 0.42f, 0.42f, 1.00f));
                 ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
                 ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, ImVec4(0.93f, 0.93f, 0.93f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(69.0f / 255.0f, 69.0f / 255.0f, 67.0f / 255.0f, 0.94f));
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowMinSize, ImVec2(340.f * m_scale * imgui.scaled(1.0f / 15.0f), 0));
                 ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), 0, ImVec2(0.5f, 0.5f));
                 ImGui::Begin(_L("Statistics of All Plates").c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
@@ -1071,7 +1152,7 @@ namespace Slic3r
                     }
                 }
                 ImGui::End();
-                ImGui::PopStyleColor(6);
+                ImGui::PopStyleColor(8);
                 ImGui::PopStyleVar(3);
                 return;
             }
@@ -1206,15 +1287,20 @@ namespace Slic3r
                         {
                         case EMoveType::Extrude:
                         {
-                            if (curr.extrusion_role != ExtrusionRole::erCustom) {
+                            if (curr.extrusion_role != ExtrusionRole::erCustom || curr.is_pa_line_calibration) {
                                 m_p_extrusions->ranges.height.update_from(round_to_bin(curr.height));
                                 m_p_extrusions->ranges.width.update_from(round_to_bin(curr.width));
                             }// prevent the start code extrude extreme height/width and make the range deviate from the normal range
                             m_p_extrusions->ranges.fan_speed.update_from(curr.fan_speed);
                             m_p_extrusions->ranges.additional_fan_speed.update_from(curr.additional_fan_speed);
                             m_p_extrusions->ranges.temperature.update_from(curr.temperature);
-                            if (curr.extrusion_role != erCustom || is_extrusion_role_visible(ExtrusionRole::erCustom))
-                                m_p_extrusions->ranges.volumetric_rate.update_from(round_to_bin(curr.volumetric_rate()));
+                            if (curr.extrusion_role != erCustom || is_extrusion_role_visible(ExtrusionRole::erCustom)) {
+                                // Skip sub-resolution segments: their mm3_per_mm is noise-dominated (see
+                                // VOLUMETRIC_RATE_MIN_SEGMENT_LEN) and would inflate the legend max.
+                                const float seg_len = (curr.position - gcode_result.moves[i - 1].position).norm();
+                                if (seg_len >= VOLUMETRIC_RATE_MIN_SEGMENT_LEN)
+                                    m_p_extrusions->ranges.volumetric_rate.update_from(round_to_bin(curr.volumetric_rate()));
+                            }
                             if (curr.layer_duration > 0.f) {
                                 m_p_extrusions->ranges.layer_duration.update_from(curr.layer_duration);
                             }
@@ -1989,6 +2075,7 @@ namespace Slic3r
                             columns_offsets.push_back({ travel_percent, offsets[2] });
                             append_item(EItemType::Rect, Travel_Colors[0], columns_offsets, true, visible, [this, item, visible]() {
                                 set_move_type_visible(item, !visible);
+                                refresh(*m_gcode_result, wxGetApp().plater()->get_extruder_colors_from_plater_config(m_gcode_result));
                                 on_visibility_changed();
                                 });
                         }
@@ -2881,15 +2968,15 @@ namespace Slic3r
                         imgui.text(_u8L("Current grouping of slice result is not optimal."));
                         wxString tip;
                         if (delta_weight_to_best >= 0 && delta_change_to_best >= 0)
-                            tip = from_u8((boost::format(_u8L("Increase %1%g filament and %2% changes compared to optimal grouping."))
+                            tip = from_u8((boost::format(_u8L("Increase %1%g filament and %2% nozzle purges compared to optimal grouping."))
                                 % number_format(delta_weight_to_best)
                                 % delta_change_to_best).str());
                         else if (delta_weight_to_best >= 0 && delta_change_to_best < 0)
-                            tip = from_u8((boost::format(_u8L("Increase %1%g filament and save %2% changes compared to optimal grouping."))
+                            tip = from_u8((boost::format(_u8L("Increase %1%g filament and save %2% nozzle purges compared to optimal grouping."))
                                 % number_format(delta_weight_to_best)
                                 % std::abs(delta_change_to_best)).str());
                         else if (delta_weight_to_best < 0 && delta_change_to_best >= 0)
-                            tip = from_u8((boost::format(_u8L("Save %1%g filament and increase %2% changes compared to optimal grouping."))
+                            tip = from_u8((boost::format(_u8L("Save %1%g filament and increase %2% nozzle purges compared to optimal grouping."))
                                 % number_format(std::abs(delta_weight_to_best))
                                 % delta_change_to_best).str());
                         imgui.text_wrapped(tip, parent_width);
@@ -2900,15 +2987,15 @@ namespace Slic3r
                         ImGui::PushStyleColor(ImGuiCol_Text, color);
                         wxString tip;
                         if (delta_weight_to_single_ext >= 0 && delta_change_to_single_ext >= 0)
-                            tip = from_u8((boost::format(_u8L("Save %1%g filament and %2% changes compared to a printer with one nozzle."))
+                            tip = from_u8((boost::format(_u8L("Save %1%g filament and %2% nozzle purges compared to a printer with one nozzle."))
                                 % number_format(delta_weight_to_single_ext)
                                 % delta_change_to_single_ext).str());
                         else if (delta_weight_to_single_ext >= 0 && delta_change_to_single_ext < 0)
-                            tip = from_u8((boost::format(_u8L("Save %1%g filament and increase %2% changes compared to a printer with one nozzle."))
+                            tip = from_u8((boost::format(_u8L("Save %1%g filament and increase %2% nozzle purges compared to a printer with one nozzle."))
                                 % number_format(delta_weight_to_single_ext)
                                 % std::abs(delta_change_to_single_ext)).str());
                         else if (delta_weight_to_single_ext < 0 && delta_change_to_single_ext >= 0)
-                            tip = from_u8((boost::format(_u8L("Increase %1%g filament and save %2% changes compared to a printer with one nozzle."))
+                            tip = from_u8((boost::format(_u8L("Increase %1%g filament and save %2% nozzle purges compared to a printer with one nozzle."))
                                 % number_format(std::abs(delta_weight_to_single_ext))
                                 % delta_change_to_single_ext).str());
                         imgui.text_wrapped(tip, parent_width);

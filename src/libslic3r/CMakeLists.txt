@@ -73,6 +73,8 @@ set(lisbslic3r_sources
     CurveAnalyzer.hpp
     CutUtils.cpp
     CutUtils.hpp
+    PaintReproject.cpp
+    PaintReproject.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -142,6 +144,10 @@ set(lisbslic3r_sources
     format.hpp
     Format/3mf.cpp
     Format/3mf.hpp
+    Format/AssemblyStepsJson.cpp
+    Format/AssemblyStepsJson.hpp
+    Format/AssemblyTreeJson.cpp
+    Format/AssemblyTreeJson.hpp
     Format/bbs_3mf.cpp
     Format/bbs_3mf.hpp
     Format/AMF.cpp
@@ -158,6 +164,15 @@ set(lisbslic3r_sources
     Format/SL1.cpp
 	Format/svg.hpp
     Format/svg.cpp
+    Format/AssimpImport.hpp
+    Format/AssimpImport.cpp
+    TexturePainting.hpp
+    TexturePainting.cpp
+    Win10ModelRepair.hpp
+    TextureToColor/TextureToColor.hpp
+    TextureToColor/TextureToColor.cpp
+    TextureToColor/ColorUtils.hpp
+    TextureToColor/ColorUtils.cpp
     GCode/ThumbnailData.cpp
     GCode/ThumbnailData.hpp
     GCode/GCodeEditor.cpp
@@ -184,6 +199,8 @@ set(lisbslic3r_sources
     GCode/AvoidCrossingPerimeters.hpp
     GCode/ConflictChecker.cpp
     GCode/ConflictChecker.hpp
+    GCode/BedExcludeChecker.cpp
+    GCode/BedExcludeChecker.hpp
     GCode/Smoothing.cpp
     GCode/Smoothing.hpp
     GCode/CoolingBuffer.cpp
@@ -344,6 +361,8 @@ set(lisbslic3r_sources
     Tesselate.hpp
     TriangleMesh.cpp
     TriangleMesh.hpp
+    MeshDiagnostics.hpp
+    MeshDiagnostics.cpp
     TriangleMeshDeal.cpp
     TriangleMeshDeal.hpp
     TriangleMeshSlicer.cpp
@@ -478,6 +497,8 @@ set(lisbslic3r_sources
     FilamentMixer.hpp
     FilamentMixer.cpp
     FilamentMixerModel.hpp
+    ColorDecomposeRecipe.hpp
+    ColorDecomposeRecipe.cpp
 )
 
 if (APPLE)
@@ -501,7 +522,26 @@ set(CGAL_DO_NOT_WARN_ABOUT_CMAKE_BUILD_TYPE ON CACHE BOOL "" FORCE)
 cmake_policy(PUSH)
 cmake_policy(SET CMP0011 NEW)
 find_package(CGAL REQUIRED)
+if(MSVC AND MSVC_VERSION GREATER_EQUAL 1950 AND NOT DEFINED OpenCV_RUNTIME)
+    # OpenCV 4.6.0 doesn't recognize MSVC 19.5x (VS2026). Pick the installed runtime
+    # layout under CMAKE_PREFIX_PATH; vc16/vc17 static libs are ABI-compatible.
+    foreach(_opencv_runtime vc17 vc16)
+        foreach(_prefix IN LISTS CMAKE_PREFIX_PATH)
+            if(EXISTS "${_prefix}/x64/${_opencv_runtime}/staticlib/OpenCVConfig.cmake")
+                set(OpenCV_RUNTIME ${_opencv_runtime})
+                break()
+            endif()
+        endforeach()
+        if(DEFINED OpenCV_RUNTIME)
+            break()
+        endif()
+    endforeach()
+    if(NOT DEFINED OpenCV_RUNTIME)
+        set(OpenCV_RUNTIME vc17)
+    endif()
+endif()
 find_package(OpenCV REQUIRED core)
+find_package(assimp REQUIRED)
 cmake_policy(POP)
 
 add_library(libslic3r_cgal STATIC
@@ -544,7 +584,7 @@ endif ()
 encoding_check(libslic3r)
 
 target_compile_definitions(libslic3r PUBLIC -DUSE_TBB -DTBB_USE_CAPTURED_EXCEPTION=0)
-target_include_directories(libslic3r PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(libslic3r PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/TextureToColor PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(libslic3r PUBLIC ${EXPAT_INCLUDE_DIRS})
 
 # Find the OCCT and related libraries
@@ -606,10 +646,13 @@ target_link_libraries(libslic3r
     Clipper2
     mcut
     opencv_world
+    ${_cgal_tgt}
+    assimp::assimp
     )
 
 if(NOT WIN32)
-    target_link_libraries(libslic3r freetype)
+    find_package(Freetype REQUIRED)
+    target_link_libraries(libslic3r Freetype::Freetype)
     if (NOT APPLE)
         target_link_libraries(libslic3r fontconfig)
     endif()

@@ -20,6 +20,7 @@
 #include "CommonDefs.hpp"
 #include "Config.hpp"
 #include "Polygon.hpp"
+#include <atomic>
 #include <boost/preprocessor/facilities/empty.hpp>
 #include <boost/preprocessor/punctuation/comma_if.hpp>
 #include <boost/preprocessor/seq/for_each.hpp>
@@ -32,6 +33,8 @@
 
 namespace Slic3r {
 
+class DynamicPrintConfig;
+
 enum GCodeFlavor : unsigned char {
     gcfMarlinLegacy, gcfKlipper, gcfRepRapSprinter, gcfRepRapFirmware, gcfRepetier, gcfTeacup, gcfMakerWare, gcfMarlinFirmware, gcfSailfish, gcfMach3, gcfMachinekit,
     gcfSmoothie, gcfNoExtrusion
@@ -41,6 +44,14 @@ enum FilamentUsageType {
     SupportOnly,
     ModelOnly,
     Hybrid
+};
+
+// AMS load/unload timing-vector indices. Values stay aligned with the existing
+// preset layout; index 0 is reserved for the legacy external-spool slot.
+enum class AmsTimeType : int {
+    Ams     = 1,
+    AmsLite = 2,
+    N3SF    = 3,
 };
 
 enum class FuzzySkinType {
@@ -297,7 +308,8 @@ enum FanDirection {
 
 enum PrimeVolumeMode {
     pvmDefault = 0,
-    pvmSaving
+    pvmSaving,
+    pvmFast 
 };
 
 static std::unordered_map<NozzleType, std::string>NozzleTypeEumnToStr = {
@@ -348,7 +360,8 @@ enum NozzleVolumeType {
     nvtHighFlow,
     nvtHybrid,
     nvtTPUHighFlow,
-    nvtMaxNozzleVolumeType = nvtTPUHighFlow
+    nvtE3DHighFlow = 5,
+    nvtMaxNozzleVolumeType = nvtE3DHighFlow
 };
 
 enum FilamentMapMode {
@@ -383,6 +396,9 @@ inline bool is_auto_filament_map_mode(FilamentMapMode mode) {
     return mode == fmmAutoForFlush || mode == fmmAutoForMatch || mode == fmmAutoForQuality;
 }
 
+enum CounterboreHoleBridgingOption {
+    chbNone, chbBridges, chbFilled
+};
 extern std::string get_extruder_variant_string(ExtruderType extruder_type, NozzleVolumeType nozzle_volume_type);
 
 // 最基础的参数idx查找方法，遍历varint list寻找对应的idx
@@ -393,12 +409,30 @@ static std::set<NozzleVolumeType> get_valid_nozzle_volume_type() {
     for (int i = 0; i <= nvtMaxNozzleVolumeType; ++i) {
         auto t = static_cast<NozzleVolumeType>(i);
         if (t == nvtHybrid) continue;
+        // Skip the reserved gap between nvtTPUHighFlow (3) and nvtE3DHighFlow (5).
+        if (i > nvtTPUHighFlow && i < nvtE3DHighFlow) continue;
         type.insert(t);
     }
     return type;
 }
 
 std::string get_nozzle_volume_type_string(NozzleVolumeType nozzle_volume_type);
+
+// Canonical AMS timing type name used in slice_info (default_ams_type / ams_type).
+extern std::string get_ams_type_name(int ams_type);
+extern std::string get_ams_type_display_name(int ams_type);
+extern const std::vector<int>& get_ams_time_types();
+// Each AMS timing type owns a dedicated scalar option, so no option key needs an index
+// suffix. Returns an empty string for types without a timing option (e.g. external spool).
+extern std::string get_ams_load_time_key(int ams_type);
+extern std::string get_ams_unload_time_key(int ams_type);
+// The per-type scalar options gathered into AmsTimeType-indexed tables. Always large enough
+// to be indexed by any value from get_ams_time_types() without a bounds check. Index 0 is
+// the external spool, which has no AMS timing and therefore stays 0.
+extern std::vector<double> get_ams_load_times(const ConfigBase &config);
+extern std::vector<double> get_ams_unload_times(const ConfigBase &config);
+// Resolve machine-declared canonical AMS names to timing type enum values.
+extern std::vector<int> get_supported_ams_time_types(const std::vector<std::string> &supported_names);
 
 static std::string bed_type_to_gcode_string(const BedType type)
 {
@@ -469,13 +503,17 @@ static std::string get_bed_temp_1st_layer_key(const BedType type)
 }
 
 extern const std::vector<std::string> filament_extruder_override_keys;
+extern bool is_filament_extruder_override_key(const std::string &opt_key);
 
 // for parse extruder_ams_count
 extern std::vector<std::map<int, int>> get_extruder_ams_count(const std::vector<std::string> &strs);
 extern std::vector<std::string> save_extruder_ams_count_to_string(const std::vector<std::map<int, int>> &extruder_ams_count);
 extern NozzleVolumeType convert_to_nvt_type(const std::string& variant_str);
+extern bool is_nozzle_printable_for_filament(NozzleVolumeType machine_nvt, const std::vector<std::string>& filament_variants, bool variants_are_complete);
 extern std::vector<std::map<NozzleVolumeType, int>> get_extruder_nozzle_stats(const std::vector<std::string> & strs);
 extern std::vector<std::string> save_extruder_nozzle_stats_to_string(const std::vector<std::map<NozzleVolumeType, int>> &extruder_nozzle_stats);
+extern NozzleVolumeType legacy_fallback_nozzle_volume_type(NozzleVolumeType nozzle_volume_type);
+extern void split_nozzle_stats_for_export(DynamicPrintConfig &config);
 
 #define CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NAME) \
     template<> const t_config_enum_names& ConfigOptionEnum<NAME>::get_enum_names(); \
@@ -510,6 +548,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TopOneWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ReduceInfillRetractionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FilamentMetalStickiness)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
 
 // Defines each and every confiuration option of Slic3r, including the properties of the GUI dialogs.
@@ -596,6 +635,10 @@ public:
     void                normalize_fdm();
     void                normalize_fdm_1();
     
+    // Repair nil/invalid filament_max_volumetric_speed entries carried by corrupted/legacy
+    // project files, before they propagate NaN into slicing speeds
+    void                repair_nil_filament_max_volumetric_speed();
+
     // Normalize FDM config based on print conditions (single/multi filament, print sequence, etc.)
     // Returns the list of config keys that were changed.
     // @param ori_values: Optional external storage for backup/restore of config values.
@@ -1023,6 +1066,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, bottom_shell_thickness))
     ((ConfigOptionFloat, bridge_angle))
     ((ConfigOptionFloat, bridge_flow))
+    ((ConfigOptionEnum<CounterboreHoleBridgingOption>, counterbore_hole_bridging))
     ((ConfigOptionFloatsNullable, overhang_totally_speed))
     ((ConfigOptionFloatsNullable, bridge_speed))
     ((ConfigOptionEnum<EnsureVerticalThicknessLevel>, ensure_vertical_shell_thickness))
@@ -1134,6 +1178,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  seam_slope_steps))
     ((ConfigOptionBool,                 seam_slope_inner_walls))
     ((ConfigOptionBool,                 embedding_wall_into_infill))
+    ((ConfigOptionBool,                 alternate_extra_wall))
 )
 
 PRINT_CONFIG_CLASS_DEFINE(
@@ -1164,7 +1209,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatsNullable,       machine_min_travel_rate))
     // M205 S... [mm/sec]
     ((ConfigOptionFloatsNullable,       machine_min_extruding_rate))
-)
+    // Y axis max force (N) and bed mass (g)
+    ((ConfigOptionFloat, machine_max_force_Y))
+    ((ConfigOptionFloat, machine_bed_mass_Y))
+    ((ConfigOptionFloat, machine_max_printed_mass))
+    )
 
 // This object is mapped to Perl as Slic3r::Config::GCode.
 PRINT_CONFIG_CLASS_DEFINE(
@@ -1197,6 +1246,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             filament_mixed_sublayer_ratios))
     ((ConfigOptionBools,               filament_mixed_gradient))
     ((ConfigOptionStrings,             filament_mixed_gradient_range))
+    ((ConfigOptionStrings,             filament_mixed_gradient_curve))
+    ((ConfigOptionBools,               filament_mixed_gradient_per_part))
     ((ConfigOptionInts,                filament_printable))
     ((ConfigOptionInts,                filament_extruder_compatibility))
     ((ConfigOptionEnumsGeneric,        filament_scarf_seam_type))
@@ -1233,6 +1284,13 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionStrings,             print_extruder_variant))
     ((ConfigOptionFloat,               machine_load_filament_time))
     ((ConfigOptionFloat,               machine_unload_filament_time))
+    ((ConfigOptionFloat,               ams_filament_load_time_ams))
+    ((ConfigOptionFloat,               ams_filament_load_time_ams_lite))
+    ((ConfigOptionFloat,               ams_filament_load_time_n3f_s))
+    ((ConfigOptionFloat,               ams_filament_unload_time_ams))
+    ((ConfigOptionFloat,               ams_filament_unload_time_ams_lite))
+    ((ConfigOptionFloat,               ams_filament_unload_time_n3f_s))
+    ((ConfigOptionInt,                 default_ams_type))
     ((ConfigOptionFloat,               machine_switch_extruder_time))
     ((ConfigOptionFloat,               machine_hotend_change_time))
     ((ConfigOptionBool,                group_algo_with_time))
@@ -1247,9 +1305,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_minimal_purge_on_wipe_tower))
     ((ConfigOptionFloatsNullable,      filament_flush_volumetric_speed))
     ((ConfigOptionIntsNullable,        filament_flush_temp))
+    ((ConfigOptionIntsNullable,        filament_flush_temp_fast))
     // BBS
     ((ConfigOptionBool,                scan_first_layer))
     ((ConfigOptionBool,                enable_wrapping_detection))
+    ((ConfigOptionBool,                enable_order_independent_overlap_carving))
     ((ConfigOptionInt,                 wrapping_detection_layers))
     ((ConfigOptionPoints,              wrapping_exclude_area))
     ((ConfigOptionPoints,              thumbnail_size))
@@ -1304,6 +1364,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_cooling_filter))
     ((ConfigOptionBool,                cooling_filter_enabled))
     ((ConfigOptionIntsNullable,        extruder_max_nozzle_count))
+    ((ConfigOptionBool,                support_fast_purge_mode))
     ((ConfigOptionBool,                accel_to_decel_enable))
     ((ConfigOptionPercent,             accel_to_decel_factor))
     ((ConfigOptionEnumsGeneric,        extruder_type))
@@ -1352,6 +1413,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionPointsGroups,       extruder_printable_area))
     //BBS: add bed_exclude_area
     ((ConfigOptionPoints,             bed_exclude_area))
+    // Nested heat-soak zones on bed (inner rectangle first).
+    ((ConfigOptionPoints,             bed_heat_soak_area))
     ((ConfigOptionPoints,             head_wrap_detect_zone))
     // BBS
     ((ConfigOptionString,             bed_custom_texture))
@@ -1435,6 +1498,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloatsNullable,     retraction_minimum_travel))
     ((ConfigOptionBoolsNullable,      retract_when_changing_layer))
     ((ConfigOptionFloat,              skirt_distance))
+    ((ConfigOptionBool,               skirt_per_object))
     ((ConfigOptionInt,                skirt_height))
     ((ConfigOptionInt,                skirt_loops))
     ((ConfigOptionInts,               slow_down_layer_time))
@@ -1472,6 +1536,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloats,             flush_volumes_vector))
     // BBS: wipe tower is only used for priming
     ((ConfigOptionFloats,             flush_multiplier))
+    ((ConfigOptionFloats,             flush_multiplier_fast))
     //((ConfigOptionFloat,              z_offset))
     // BBS: project filaments
     ((ConfigOptionFloats,             filament_colour_new))
@@ -1480,6 +1545,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloatsNullable,     nozzle_volume))
     ((ConfigOptionPoints,             start_end_points))
     ((ConfigOptionEnum<TimelapseType>,    timelapse_type))
+    ((ConfigOptionBool,               farthest_point_timelapse))
     ((ConfigOptionFloat,              default_jerk))
     ((ConfigOptionFloat,              outer_wall_jerk))
     ((ConfigOptionFloat,              inner_wall_jerk))
@@ -1815,8 +1881,8 @@ Points get_bed_shape(const DynamicPrintConfig &cfg, bool use_share = true);
 Points get_bed_shape(const PrintConfig &cfg, bool use_share = false);
 Points get_bed_shape(const SLAPrinterConfig &cfg);
 Slic3r::Polygon get_bed_shape_with_excluded_area(const PrintConfig& cfg, bool use_share = false);
-bool has_skirt(const DynamicPrintConfig& cfg);
-float get_real_skirt_dist(const DynamicPrintConfig& cfg);
+bool has_skirt(const ConfigBase& cfg);
+float get_real_skirt_dist(const ConfigBase& cfg);
 
 // ModelConfig is a wrapper around DynamicPrintConfig with an addition of a timestamp.
 // Each change of ModelConfig is tracked by assigning a new timestamp from a global counter.
@@ -1896,7 +1962,6 @@ public:
     // from the timestmap of the object at the top of the Undo / Redo stack.
     virtual uint64_t    timestamp() const throw() { return m_timestamp; }
     bool                timestamp_matches(const ModelConfig &rhs) const throw() { return m_timestamp == rhs.m_timestamp; }
-    // Not thread safe! Should not be called from other than the main thread!
     void                touch() { m_timestamp = ++ s_last_timestamp; }
     bool operator==(const ModelConfig &other) const {
         return m_data == other.m_data;
@@ -1909,7 +1974,9 @@ private:
     uint64_t                    m_timestamp { 1 };
     DynamicPrintConfig          m_data;
 
-    static uint64_t             s_last_timestamp;
+    // Atomic because touch() is reached from a worker thread: a cut copies each source volume's
+    // config onto the volumes of its own private clone.
+    static std::atomic<uint64_t> s_last_timestamp;
 };
 
 // const std::vector<double> &fv_matrix:  origin matrix from json

@@ -83,6 +83,44 @@ int get_tray_id_by_ams_id_and_slot_id(int ams_id, int slot_id)
     }
 }
 
+namespace {
+
+// Stringing-prone filament IDs per nozzle-diameter bucket.
+// Mirrors the printer firmware tables (see g_leak_pron_idx_for_0_4 / _0_6_0_8).
+// Keep these in sync with firmware when new stringing-prone filaments are added.
+const std::unordered_set<std::string> g_stringing_prone_for_0_4 = {
+    "GFA11", // Bambu PLA Aero
+    "GFU90", // Bambu TPU 90A
+    "GFU00", // Bambu TPU 95A HF
+    "GFU02", // Generic TPU for AMS
+    "GFU98", // Bambu TPU for AMS
+};
+
+const std::unordered_set<std::string> g_stringing_prone_for_0_6_0_8 = {
+    "GFA11", // Bambu PLA Aero
+    "GFU00", // Bambu TPU 95A HF
+};
+
+// Pick the right table for the given nozzle diameter; returns nullptr if the
+// nozzle bucket has no entries (e.g. 0.2 mm) or the diameter is invalid.
+const std::unordered_set<std::string>* pick_stringing_set(float nozzle_diameter)
+{
+    if (!(nozzle_diameter > 0.f)) return nullptr;
+    if (nozzle_diameter < 0.3f) return nullptr;            // 0.2 nozzle: empty
+    if (nozzle_diameter < 0.5f) return &g_stringing_prone_for_0_4;
+    return &g_stringing_prone_for_0_6_0_8;                 // 0.6 / 0.8 nozzles
+}
+
+} // namespace
+
+bool Slic3r::is_stringing_prone_filament(const std::string& filament_id, float nozzle_diameter)
+{
+    if (filament_id.empty()) return false;
+    const auto* set = pick_stringing_set(nozzle_diameter);
+    if (!set) return false;
+    return set->count(filament_id) > 0;
+}
+
 wxString Slic3r::get_stage_string(int stage)
 {
     switch(stage) {
@@ -159,9 +197,9 @@ wxString Slic3r::get_stage_string(int stage)
     case 35:
         return _L("Pause (nozzle clog)");
     case 36:
-        return _L("Measuring motion percision");
+        return _L("Measuring motion precision");
     case 37:
-        return _L("Enhancing motion percision");
+        return _L("Enhancing motion precision");
     case 38:
         return _L("Measure motion accuracy");
     case 39:
@@ -350,6 +388,10 @@ static wxString _generate_nozzle_id(NozzleVolumeType nozzle_type, const std::str
     }
     case NozzleVolumeType::nvtTPUHighFlow: {
         nozzle_id += "U";
+        break;
+    }
+    case NozzleVolumeType::nvtE3DHighFlow: {
+        nozzle_id += "B";
         break;
     }
     default:
@@ -762,6 +804,33 @@ std::string MachineObject::get_filament_display_type(const std::string& ams_id, 
     return tray.has_value() ? tray->get_display_filament_type() : "";
 }
 
+bool MachineObject::any_loaded_filament_is_stringing_prone() const
+{
+    if (print_job_filament_mapping.empty()) return false;
+
+    std::vector<float> nozzle_diameters;
+    if (m_extder_system) {
+        for (const auto& ext : m_extder_system->GetExtruders()) {
+            const float d = ext.GetNozzleDiameter();
+            if (d > 0.f) nozzle_diameters.push_back(d);
+        }
+    }
+    if (nozzle_diameters.empty()) return false;
+
+    for (uint16_t v : print_job_filament_mapping) {
+        if (v == 0xFFFF) continue;
+        const int ams_id  = (v >> 8) & 0xFF;
+        const int slot_id = v & 0xFF;
+        const std::string fid = this->get_filament_id(std::to_string(ams_id), std::to_string(slot_id));
+        if (fid.empty()) continue;
+        for (float d : nozzle_diameters) {
+            if (Slic3r::is_stringing_prone_filament(fid, d))
+                return true;
+        }
+    }
+    return false;
+}
+
 void MachineObject::_parse_ams_status(int ams_status)
 {
     ams_status_sub = ams_status & 0xFF;
@@ -862,28 +931,20 @@ bool MachineObject::check_version_valid()
 
 std::map<int, DevFirmwareVersionInfo> MachineObject::get_ams_version()
 {
-    std::vector<std::string> multi_tray_ams_type = {"ams", "n3f"};
     std::map<int, DevFirmwareVersionInfo> result;
-    for (int i = 0; i < 8; i++) {
-        std::string ams_id;
-        for (auto type : multi_tray_ams_type)
-        {
-            ams_id = type + "/" + std::to_string(i);
-            auto it = module_vers.find(ams_id);
-            if (it != module_vers.end()) {
-                result.emplace(std::pair(i, it->second));
-            }
-        }
-    }
+    for (const auto &module : module_vers) {
+        const std::string &key       = module.first;
+        auto               slash_pos = key.find('/');
+        if (slash_pos == std::string::npos) continue;
 
-    std::string single_tray_ams_type = "n3s";
-    int n3s_start_id = 128;
-    for (int i = n3s_start_id; i < n3s_start_id + 8; i++) {
-        std::string ams_id;
-        ams_id = single_tray_ams_type + "/" + std::to_string(i);
-        auto it = module_vers.find(ams_id);
-        if (it != module_vers.end()) {
-            result.emplace(std::pair(i, it->second));
+        std::string type = key.substr(0, slash_pos);
+        if (type != "ams" && type != "ams_f1" && type != "n3f" && type != "n3s") continue;
+
+        try {
+            int ams_id = std::stoi(key.substr(slash_pos + 1));
+            result.emplace(ams_id, module.second);
+        } catch (...) {
+            continue;
         }
     }
     return result;
@@ -1222,6 +1283,47 @@ int MachineObject::command_get_access_code() {
     j["system"]["command"] = "get_access_code";
 
     return this->publish_json(j);
+}
+
+std::string MachineObject::request_access_code(AccessCodeRefreshCallback callback)
+{
+    if (!callback)
+        return {};
+
+    json j;
+    const std::string sequence_id = std::to_string(MachineObject::m_sequence_id++);
+    j["system"]["sequence_id"] = sequence_id;
+    j["system"]["command"] = "get_access_code";
+
+    {
+        std::lock_guard<std::mutex> lock(m_access_code_refresh_mutex);
+        if (m_access_code_refresh_callback)
+            return {};
+        m_access_code_refresh_sequence_id = sequence_id;
+        m_access_code_refresh_callback = std::move(callback);
+    }
+
+    if (this->publish_json(j) != 0) {
+        AccessCodeRefreshCallback failed_callback;
+        {
+            std::lock_guard<std::mutex> lock(m_access_code_refresh_mutex);
+            failed_callback = std::move(m_access_code_refresh_callback);
+            m_access_code_refresh_sequence_id.clear();
+        }
+        if (failed_callback)
+            failed_callback(false, {}, print_status);
+    }
+
+    return sequence_id;
+}
+
+void MachineObject::cancel_access_code_request(const std::string& sequence_id)
+{
+    std::lock_guard<std::mutex> lock(m_access_code_refresh_mutex);
+    if (m_access_code_refresh_sequence_id == sequence_id) {
+        m_access_code_refresh_sequence_id.clear();
+        m_access_code_refresh_callback = nullptr;
+    }
 }
 
 
@@ -1599,7 +1701,8 @@ int MachineObject::command_ams_calibrate(int ams_id)
     return this->publish_gcode(gcode_cmd);
 }
 
-int MachineObject::command_ams_filament_settings(int ams_id, int slot_id, std::string filament_id, std::string setting_id, std::string tray_color, std::string tray_type, int nozzle_temp_min, int nozzle_temp_max)
+int MachineObject::command_ams_filament_settings(int ams_id, int slot_id, std::string filament_id, std::string setting_id, std::string tray_color, std::string tray_type,
+                                                 int nozzle_temp_min, int nozzle_temp_max, const std::vector<std::string>& tray_colors, int tray_ctype)
 {
     int tag_tray_id = 0;
     int tag_ams_id  = ams_id;
@@ -1624,6 +1727,10 @@ int MachineObject::command_ams_filament_settings(int ams_id, int slot_id, std::s
     j["print"]["nozzle_temp_min"]   = nozzle_temp_min;
     j["print"]["nozzle_temp_max"]   = nozzle_temp_max;
     j["print"]["tray_type"]         = tray_type;
+    if (!tray_colors.empty()) {
+        j["print"]["cols"]  = tray_colors;
+        j["print"]["ctype"] = tray_ctype;
+    }
 
     return this->publish_json(j);
 }
@@ -2231,6 +2338,7 @@ void MachineObject::reset()
     m_plate_index = -1;
     device_cert_installed = false;
     clear_auto_nozzle_mapping();// reset nozzle mapping
+    m_printTaskInfo.reset();
 
     // reset print_json
     json empty_j;
@@ -2523,12 +2631,35 @@ int MachineObject::parse_json(std::string tunnel, std::string payload, bool key_
         }
         if (j_pre.contains("system")) {
             if (j_pre["system"].contains("command")) {
-                if (j_pre["system"]["command"].get<std::string>() == "get_access_code") {
+                std::string system_command = j_pre["system"]["command"].get<std::string>();
+                if (system_command == "get_access_code") {
+                    std::string access_code;
                     if (j_pre["system"].contains("access_code")) {
-                        std::string access_code = j_pre["system"]["access_code"].get<std::string>();
+                        access_code = j_pre["system"]["access_code"].get<std::string>();
                         if (!access_code.empty()) {
                             set_access_code(access_code);
                             set_user_access_code(access_code);
+                        }
+                    }
+                    if (j_pre["system"].contains("sequence_id")) {
+                        std::string sequence_id;
+                        if (j_pre["system"]["sequence_id"].is_string())
+                            sequence_id = j_pre["system"]["sequence_id"].get<std::string>();
+                        else if (j_pre["system"]["sequence_id"].is_number_integer())
+                            sequence_id = std::to_string(j_pre["system"]["sequence_id"].get<long long>());
+
+                        AccessCodeRefreshCallback callback;
+                        {
+                            std::lock_guard<std::mutex> lock(m_access_code_refresh_mutex);
+                            if (sequence_id == m_access_code_refresh_sequence_id) {
+                                callback = std::move(m_access_code_refresh_callback);
+                                m_access_code_refresh_sequence_id.clear();
+                            }
+                        }
+                        if (callback)
+                        {
+                            const bool has_access_code = !access_code.empty();
+                            callback(has_access_code, std::move(access_code), print_status);
                         }
                     }
                 }
@@ -2706,6 +2837,7 @@ int MachineObject::parse_json(std::string tunnel, std::string payload, bool key_
 
         if (j.contains("print")) {
             json jj = j["print"];
+            m_printTaskInfo.parse(jj);
             int sequence_id = 0;
             if (jj.contains("sequence_id")) {
                 if (jj["sequence_id"].is_string()) {
@@ -2828,6 +2960,12 @@ int MachineObject::parse_json(std::string tunnel, std::string payload, bool key_
                     }
                 }
 
+                if (jj.contains("timelapse_slow_down")) {
+                    if (jj["timelapse_slow_down"].is_boolean()) {
+                        is_timelapse_slow_down = jj["timelapse_slow_down"].get<bool>();
+                    }
+                }
+
                 if (jj.contains("support_user_preset")) {
                     if (jj["support_user_preset"].is_boolean()) {
                         is_support_user_preset = jj["support_user_preset"].get<bool>();
@@ -2884,7 +3022,7 @@ int MachineObject::parse_json(std::string tunnel, std::string payload, bool key_
                         if (jj["errno"].is_number()) {
                             wxString text;
                             if (jj["errno"].get<int>() == -2) {
-                                 text = _L("Low temperature filament(PLA/PETG/TPU) is loaded in the extruder.In order to avoid extruder clogging,it is not allowed to set the chamber temperature.");
+                                 text = _L("Low temperature filament (PLA/PETG/TPU) is loaded in the extruder. In order to avoid extruder clogging, it is not allowed to set the chamber temperature.");
                             }
                             else if (jj["errno"].get<int>() == -4) {
                                  text = _L("When you set the chamber temperature below 40\u2103, the chamber temperature control will not be activated. And the target chamber temperature will automatically be set to 0\u2103.");
@@ -4002,8 +4140,23 @@ DevAmsTray MachineObject::parse_vt_tray(json vtray)
     auto vt_tray = DevAmsTray(std::to_string(VIRTUAL_TRAY_MAIN_ID));
     vt_tray.ams_type = DevAmsType::EXT_SPOOL;
 
-    if (vtray.contains("id"))
-        vt_tray.id = vtray["id"].get<std::string>();
+    if (vtray.contains("id")) {
+        std::string id = vtray["id"].get<std::string>();
+
+        int id_int = 0;
+        try{
+            id_int = std::stoi(id);
+        } catch(...){
+            BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ <<"invaild tray id"<< std::endl;
+        }
+        // bit0~7 slot_id   bit8~15 ams_id
+        if ((id_int >> 8) > 0 && (id_int & 0xff) >= 0) {
+            vt_tray.id = std::to_string((id_int >> 8) + (id_int & 0xff));
+        } else {
+            vt_tray.id = id;
+        }
+    }
+
     auto curr_time = std::chrono::system_clock::now();
     auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - extrusion_cali_set_hold_start);
     if (diff.count() > HOLD_TIMEOUT || diff.count() < 0
@@ -4017,8 +4170,7 @@ DevAmsTray MachineObject::parse_vt_tray(json vtray)
 
     if (vt_tray.hold_count > 0) {
         vt_tray.hold_count--;
-    }
-    else {
+    } else {
         if (vtray.contains("tag_uid"))
             vt_tray.tag_uid = vtray["tag_uid"].get<std::string>();
         else
@@ -4085,6 +4237,10 @@ DevAmsTray MachineObject::parse_vt_tray(json vtray)
             vt_tray.uuid = vtray["tray_uuid"].get<std::string>();
         else
             vt_tray.uuid = "0";
+        if (vtray.contains("tray_id_name"))
+            vt_tray.tray_id_name = vtray["tray_id_name"].get<std::string>();
+        else
+            vt_tray.tray_id_name = "";
 
         if (vtray.contains("cali_idx"))
             vt_tray.cali_idx = vtray["cali_idx"].get<int>();
@@ -4125,6 +4281,13 @@ DevAmsTray MachineObject::parse_vt_tray(json vtray)
         }
         else {
             vt_tray.remain = -1;
+        }
+
+        if (vtray.contains("remain_g")) {
+            vt_tray.remain_g = vtray["remain_g"].get<int>();
+        }
+        else {
+            vt_tray.remain_g = -1;
         }
     }
 
@@ -4305,12 +4468,24 @@ void MachineObject::parse_new_info(json print)
         is_support_update_remain_hide_display = (get_flag_bits_no_border(fun2, 6) == 1);
         is_support_remote_dry = (get_flag_bits_no_border(fun2, 5) == 1);
         is_support_active_arc_fitting = (get_flag_bits_no_border(fun2, 8) == 1);
+        is_support_model_internal_storage = (get_flag_bits_no_border(fun2, 17) == 1);
         is_support_check_track_switch_match_slice_printer = (get_flag_bits_no_border(fun2, 19) == 1);
         ams_preload_version = static_cast<int>(get_flag_bits_no_border(fun2, 21, 2));
+        is_support_filament_manual_multi_color = (get_flag_bits_no_border(fun2, 23) == 1);
 
         if (DevPrinterConfigUtil::support_print_check_firmware_for_tpu_left(printer_type)) {
             m_firmware_support_print_tpu_left = DevUtil::get_flag_bits_no_border(fun2, 7) == 1;
         }
+    }
+
+    /* mapping: per-filament-index AMS slot mapping (task-level state). */
+    if (print.contains("mapping") && print["mapping"].is_array()) {
+        std::vector<uint16_t> new_mapping;
+        new_mapping.reserve(print["mapping"].size());
+        for (const auto& v : print["mapping"]) {
+            new_mapping.push_back(static_cast<uint16_t>(v.get<unsigned>()));
+        }
+        print_job_filament_mapping = std::move(new_mapping);
     }
 
     /*aux*/

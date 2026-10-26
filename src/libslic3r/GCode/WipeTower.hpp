@@ -342,6 +342,7 @@ public:
         float filament_tower_interface_print_temp;
         float filament_tower_interface_pre_extrusion_dist = 0;
         float filament_tower_interface_pre_extrusion_length = 0;
+        float filament_petg_pre_extrusion_offset_dist = 0;
     };
 
 
@@ -468,7 +469,10 @@ private:
     //float           m_parking_pos_retraction    = 0.f;
     //float           m_extra_loading_move        = 0.f;
     float           m_bridging                  = 0.f;
-    bool            m_no_sparse_layers          = false;
+    // Not the raw wipe_tower_no_sparse_layers option: it also accounts for the settings that put a
+    // tower on every layer regardless. Keeping m_first_layer_idx at the bottom-most planned layer and
+    // counting the filament of a layer that is printed anyway both depend on that distinction.
+    bool            m_sparse_layers_skipped       = false;
     // BBS: remove useless config
     //bool            m_set_extruder_trimpot      = false;
     bool            m_adhesion                  = true;
@@ -528,6 +532,7 @@ private:
     bool                       is_valid_last_layer(int tool, int layer_id, double layer_z) const;
     bool                       m_flat_ironing=false;
     bool                       m_contact_ironing = false;
+    bool                       m_has_filament_switcher = false;
     float                      m_contact_speed   = 20 * 60.f;
     std::vector<int>           m_physical_extruder_map;
 	// Calculates length of extrusion line to extrude given volume
@@ -551,6 +556,7 @@ private:
     void save_on_last_wipe();
 
 	bool is_tpu_filament(int filament_id) const;
+	bool is_petg_filament(int filament_id) const;
     bool is_need_reverse_travel(int filament, bool extruder_change) const;
 	// BBS
 	box_coordinates align_perimeter(const box_coordinates& perimeter_box);
@@ -625,6 +631,22 @@ private:
 };
 
 
+// Compaction rule for wipe_tower_no_sparse_layers. Shared by the G-code emitter and by the
+// clearance validator so that both agree on where the compacted tower actually sits; a drift
+// between the two would either let a real nozzle collision through or reject a safe plate.
+
+// Whether sparse layers are really skipped, i.e. whether the tower is compacted at all. Smooth
+// timelapse and wrapping detection put a tower on every layer, so no layer is ever dropped and the
+// tower keeps following the object even though the option is on. Tower planning, G-code emission and
+// the clearance validator all ask this single question, so none of them can compact on its own.
+bool wipe_tower_sparse_layers_skipped(const PrintConfig &config);
+
+// A planned layer prints no tower at all when its only toolchange keeps the same filament.
+bool wipe_tower_layer_is_sparse(const std::vector<WipeTower::ToolChangeResult> &layer_tool_changes);
+
+// Print z the compacted tower reaches on every planned layer. Sparse layers carry over the
+// previous value, so the tower falls one layer height behind the object for each of them.
+std::vector<float> compute_compacted_wipe_tower_z(const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes);
 
 
 } // namespace Slic3r

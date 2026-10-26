@@ -96,6 +96,8 @@ namespace Slic3r {
         //BBS: the flush amount of every filament
         std::map<size_t, double>                            flush_per_filament;
         std::map<ExtrusionRole, std::pair<double, double>>  used_filaments_per_role;
+        std::map<size_t, double>                            load_time_per_filament;
+        std::map<size_t, double>                            unload_time_per_filament;
 
         std::array<Mode, static_cast<size_t>(ETimeMode::Count)> modes;
         unsigned int                                        total_flush_filament_changes;
@@ -115,6 +117,8 @@ namespace Slic3r {
             total_volumes_per_extruder.clear();
             flush_per_filament.clear();
             used_filaments_per_role.clear();
+            load_time_per_filament.clear();
+            unload_time_per_filament.clear();
             total_flush_filament_changes = 0;
             total_filament_changes = 0;
         }
@@ -140,7 +144,7 @@ namespace Slic3r {
     {
         int error_code = 0;   // 0 means succeed, 0b 0001 multi extruder printable area error, 0b 0010 multi extruder printable height error,
         // 0b 0100 plate printable area error, 0b 1000 plate printable height error, 0b 10000 wrapping detection area error
-        // (1<<10) filament map error
+        // (1<<10) filament map error , (1<<11) printing mass ouver limit
         std::map<int, std::vector<std::pair<int, int>>> print_area_error_infos;   // printable_area  extruder_id to <filament_id - object_label_id> which cannot printed in this extruder
         std::map<int, std::vector<std::pair<int, int>>> print_height_error_infos;   // printable_height extruder_id to <filament_id - object_label_id> which cannot printed in this extruder
         void reset() {
@@ -222,6 +226,7 @@ namespace Slic3r {
             std::vector<Vec3f> interpolation_points;     // interpolation points of arc for drawing
             int  object_label_id{-1};
             float print_z{0.0f};
+            bool is_pa_line_calibration{false};
 
             float volumetric_rate() const { return feedrate * mm3_per_mm; }
             //BBS: new function to support arc move
@@ -247,6 +252,13 @@ namespace Slic3r {
             bool use_for_support{false};
         };
 
+        struct PausePrintInfo
+        {
+            int percent{0};
+            int remaining_time{0}; // min
+            unsigned int layer_id{0};
+        };
+
         std::string filename;
         unsigned int id;
         std::vector<MoveVertex> moves;
@@ -262,6 +274,7 @@ namespace Slic3r {
         bool toolpath_outside;
         //BBS: add object_label_enabled
         bool label_object_enabled;
+        bool support_material_on_wipe_tower{false};
         //BBS : extra retraction when change filament,experiment func
         bool long_retraction_when_cut {0};
         int timelapse_warning_code {0};
@@ -293,6 +306,7 @@ namespace Slic3r {
         std::vector<unsigned int> nozzle_change_sequence;
         std::vector<unsigned int> filament_change_sequence;
         std::vector<int> optimal_assignment;
+        std::vector<PausePrintInfo> pause_printing;
         // first key stores `from` filament, second keys stores the `to` filament
         std::map<std::pair<int,int>, int > filament_change_count_map;
 
@@ -301,6 +315,9 @@ namespace Slic3r {
         BedType bed_type = BedType::btCount;
 
         std::vector<FilamentUseInfo> used_filaments;
+        // 0-based mixed (virtual) filament slots actually used on this plate.
+        // Recorded before resolve_mixed_filaments expands them to physical components.
+        std::vector<unsigned int> used_mixed_filaments;
 #if ENABLE_GCODE_VIEWER_STATISTICS
         int64_t time{ 0 };
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
@@ -319,10 +336,12 @@ namespace Slic3r {
             wrapping_exclude_area = other.wrapping_exclude_area;
             toolpath_outside = other.toolpath_outside;
             label_object_enabled = other.label_object_enabled;
+            support_material_on_wipe_tower = other.support_material_on_wipe_tower;
             update_imgui_flag         = other.update_imgui_flag;
             is_helio_gcode            = other.is_helio_gcode;
             long_retraction_when_cut = other.long_retraction_when_cut;
             timelapse_warning_code = other.timelapse_warning_code;
+            support_traditional_timelapse = other.support_traditional_timelapse;
             printable_height = other.printable_height;
             settings_ids = other.settings_ids;
             filaments_count = other.filaments_count;
@@ -343,9 +362,11 @@ namespace Slic3r {
             filament_change_sequence = other.filament_change_sequence;
             nozzle_change_sequence = other.nozzle_change_sequence;
             optimal_assignment = other.optimal_assignment;
+            pause_printing = other.pause_printing;
             skippable_part_time = other.skippable_part_time;
             initial_layer_time = other.initial_layer_time;
             used_filaments = other.used_filaments;
+            used_mixed_filaments = other.used_mixed_filaments;
 #if ENABLE_GCODE_VIEWER_STATISTICS
             time = other.time;
 #endif
@@ -647,8 +668,10 @@ namespace Slic3r {
             {
                 unsigned int g1_line_id;
                 float elapsed_time;
+                unsigned int layer_id{0};
             };
             std::vector<StopTime> stop_times;
+            std::vector<StopTime> pause_times;
             std::string line_m73_main_mask;
             std::string line_m73_stop_mask;
             State curr;
@@ -1172,6 +1195,7 @@ namespace Slic3r {
         float m_first_layer_height; // mm
         float m_zero_layer_height; // mm
         bool m_processing_start_custom_gcode;
+        bool m_pa_line_calibration;
         unsigned int m_g1_line_id;
         unsigned int m_layer_id;
         CpColor m_cp_color;

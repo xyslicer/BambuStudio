@@ -38,6 +38,8 @@ static constexpr int   FADING_OUT_TIMEOUT = 100;
 namespace Slic3r {
 namespace GUI {
 
+static const std::string HIGH_SHRINKAGE_FILAMENT_HINT_KEY = "Filament Shrinkage";
+
 wxDEFINE_EVENT(EVT_EJECT_DRIVE_NOTIFICAION_CLICKED, EjectDriveNotificationClickedEvent);
 wxDEFINE_EVENT(EVT_EXPORT_GCODE_NOTIFICAION_CLICKED, ExportGcodeNotificationClickedEvent);
 wxDEFINE_EVENT(EVT_PRESET_UPDATE_AVAILABLE_CLICKED, PresetUpdateAvailableClickedEvent);
@@ -64,54 +66,18 @@ namespace {
 			ImGui::PushStyleColor(idx, col);
 	}
 
-	void open_folder(const std::string& path)
+	bool get_high_shrinkage_filament_names(std::string& filament_names)
 	{
-		// Code taken from desktop_open_datadir_folder()
+		Plater* plater = wxGetApp().plater();
+		if (plater == nullptr)
+			return false;
 
-		// Execute command to open a file explorer, platform dependent.
-		// FIXME: The const_casts aren't needed in wxWidgets 3.1, remove them when we upgrade.
+		PartPlate* plate = plater->get_partplate_list().get_curr_plate();
+		if (plate == nullptr)
+			return false;
 
-#ifdef _WIN32
-		const wxString widepath = from_u8(path);
-		const wchar_t* argv[] = { L"explorer", widepath.GetData(), nullptr };
-		::wxExecute(const_cast<wchar_t**>(argv), wxEXEC_ASYNC, nullptr);
-#elif __APPLE__
-		const char* argv[] = { "open", path.data(), nullptr };
-		::wxExecute(const_cast<char**>(argv), wxEXEC_ASYNC, nullptr);
-#else
-		const char* argv[] = { "xdg-open", path.data(), nullptr };
-
-		// Check if we're running in an AppImage container, if so, we need to remove AppImage's env vars,
-		// because they may mess up the environment expected by the file manager.
-		// Mostly this is about LD_LIBRARY_PATH, but we remove a few more too for good measure.
-		if (wxGetEnv("APPIMAGE", nullptr)) {
-			// We're running from AppImage
-			wxEnvVariableHashMap env_vars;
-			wxGetEnvMap(&env_vars);
-
-			env_vars.erase("APPIMAGE");
-			env_vars.erase("APPDIR");
-			env_vars.erase("LD_LIBRARY_PATH");
-			env_vars.erase("LD_PRELOAD");
-			env_vars.erase("UNION_PRELOAD");
-
-			wxExecuteEnv exec_env;
-			exec_env.env = std::move(env_vars);
-
-			wxString owd;
-			if (wxGetEnv("OWD", &owd)) {
-				// This is the original work directory from which the AppImage image was run,
-				// set it as CWD for the child process:
-				exec_env.cwd = std::move(owd);
-			}
-
-			::wxExecute(const_cast<char**>(argv), wxEXEC_ASYNC, nullptr, &exec_env);
-		}
-		else {
-			// Looks like we're NOT running from AppImage, we'll make no changes to the environment.
-			::wxExecute(const_cast<char**>(argv), wxEXEC_ASYNC, nullptr, nullptr);
-		}
-#endif
+		auto full_config = wxGetApp().preset_bundle->full_config();
+		return plate->check_high_shrinkage_filament(full_config, filament_names);
 	}
 }
 
@@ -256,12 +222,14 @@ void NotificationManager::PopNotification::render(GLCanvas3D& canvas, float init
 
 	if (m_state == EState::Hidden) {
 		m_top_y = initial_y - GAP_WIDTH;
+		m_rendered_this_frame = false;
 		return;
 	}
 
 	if (m_state == EState::ClosePending || m_state == EState::Finished)
 	{
 		m_state = EState::Finished;
+		m_rendered_this_frame = false;
 		return;
 	}
 
@@ -283,6 +251,11 @@ void NotificationManager::PopNotification::render(GLCanvas3D& canvas, float init
 	ImVec2 win_pos(1.0f * (float)cnv_size.get_width() - right_gap, 1.0f * (float)cnv_size.get_height() - m_top_y);
 	imgui.set_next_window_pos(win_pos.x, win_pos.y, ImGuiCond_Always, 1.0f, 0.0f);
 	imgui.set_next_window_size(m_window_width, m_window_height, ImGuiCond_Always);
+
+	// Cache the screen-space rect (window is anchored by its top-right corner).
+	m_rendered_win_min   = ImVec2(win_pos.x - m_window_width, win_pos.y);
+	m_rendered_win_max   = ImVec2(win_pos.x, win_pos.y + m_window_height);
+	m_rendered_this_frame = true;
 
 	// find if hovered FIXME:  do it only in update state?
 	if (m_state == EState::Hovered) {
@@ -319,9 +292,9 @@ void NotificationManager::PopNotification::render(GLCanvas3D& canvas, float init
 		bbl_render_left_sign(imgui, win_size.x, win_size.y, win_pos.x, win_pos.y);
 		render_left_sign(imgui);
 		render_text(imgui, win_size.x, win_size.y, win_pos.x, win_pos.y);
+		m_minimize_b_visible = (m_multiline && m_lines_count > 3);
 		render_close_button(imgui, win_size.x, win_size.y, win_pos.x, win_pos.y);
-        m_minimize_b_visible = false;
-        if (m_multiline && m_lines_count > 3)
+		if (m_minimize_b_visible)
 			render_minimize_button(imgui, win_pos.x, win_pos.y);
 	}
 	imgui.end();
@@ -342,12 +315,14 @@ void NotificationManager::PopNotification::bbl_render_block_notification(GLCanva
 
 	if (m_state == EState::Hidden) {
 		m_top_y = initial_y - GAP_WIDTH;
+		m_rendered_this_frame = false;
 		return;
 	}
 
 	if (m_state == EState::ClosePending || m_state == EState::Finished)
 	{
 		m_state = EState::Finished;
+		m_rendered_this_frame = false;
 		return;
 	}
 
@@ -367,6 +342,11 @@ void NotificationManager::PopNotification::bbl_render_block_notification(GLCanva
     ImVec2 win_pos(1.0f * (float) cnv_size.get_width() - right_gap, 1.0f * (float) cnv_size.get_height() - m_top_y);
     imgui.set_next_window_pos(win_pos.x, win_pos.y, ImGuiCond_Always, 1.0f, 0.0f);
     imgui.set_next_window_size(m_window_width, m_window_height, ImGuiCond_Always);
+
+	// Cache the screen-space rect (window is anchored by its top-right corner).
+	m_rendered_win_min   = ImVec2(win_pos.x - m_window_width, win_pos.y);
+	m_rendered_win_max   = ImVec2(win_pos.x, win_pos.y + m_window_height);
+	m_rendered_this_frame = true;
 
 	// color change based on fading out
 	if (m_state == EState::FadingOut) {
@@ -1243,7 +1223,8 @@ void NotificationManager::ExportFinishedNotification::render_eject_button(ImGuiW
 
 bool NotificationManager::ExportFinishedNotification::on_text_click()
 {
-	open_folder(m_export_dir_path);
+    // Pass the full exported file path so the file explorer opens the containing
+    desktop_open_any_folder(m_export_path);
 	return false;
 }
 void NotificationManager::ExportFinishedNotification::on_eject_click()
@@ -1929,6 +1910,35 @@ void NotificationManager::close_slicing_customize_error_notification(Notificatio
     }
 }
 
+void NotificationManager::show_brittle_filament_notification(const std::string &text, const std::string &hypertext, std::function<bool(wxEvtHandler *)> callback)
+{
+    static bool s_user_dismissed = false;
+    if (s_user_dismissed) return;
+
+    // Already showing: nothing to do (avoids re-pushing every frame).
+    for (const std::unique_ptr<PopNotification> &notification : m_pop_notifications) {
+        if (notification->get_type() == NotificationType::BBLBrittleFilament && !notification->is_finished())
+            return;
+    }
+
+    NotificationData data{NotificationType::BBLBrittleFilament, NotificationLevel::WarningNotificationLevel, 0, _u8L("Warning:") + "\n" + text, hypertext, callback};
+    auto             notification = std::make_unique<PlaterWarningNotification>(data, m_id_provider, m_evt_handler);
+    notification->set_delete_callback([this](PopNotification *n) {
+        s_user_dismissed                = true;
+        m_to_delete_after_finish_render = n;
+    });
+    push_notification_data(std::move(notification), 0);
+}
+
+void NotificationManager::close_brittle_filament_notification()
+{
+    // Programmatic teardown (brittle filament no longer in use): real_close() genuinely
+    // removes it, unlike a user close which only hides it.
+    for (std::unique_ptr<PopNotification> &notification : m_pop_notifications)
+        if (notification->get_type() == NotificationType::BBLBrittleFilament)
+            dynamic_cast<PlaterWarningNotification *>(notification.get())->real_close();
+}
+
 void NotificationManager::push_assembly_warning_notification(const std::string& text)
 {
     NotificationData data{ NotificationType::AssemblyWarning, NotificationLevel::WarningNotificationLevel, 0,  _u8L("Warning:") + "\n" + text };
@@ -1997,6 +2007,31 @@ void NotificationManager::close_plater_warning_notification(const std::string& t
 			dynamic_cast<PlaterWarningNotification*>(notification.get())->real_close();
 		}
 	}
+}
+
+void NotificationManager::push_bed_heat_soak_notification(const std::string& text)
+{
+	close_bed_heat_soak_notification();
+
+	auto callback = [](wxEvtHandler*) {
+		std::string language = wxGetApp().app_config->get("language");
+		wxString    region = L"en";
+		if (language.find("zh") == 0)
+			region = L"zh";
+		const wxString url = wxString::Format(L"https://wiki.bambulab.com/%s/a2l/maintenance/first-layer-quality-calibration", region)
+			+ wxT("#%E5%85%B6%E4%BB%96%E5%9C%BA%E6%99%AF%E7%83%AD%E5%BA%8A%E4%BF%9D%E6%B8%A9%E7%AD%96%E7%95%A5");
+		wxGetApp().open_browser_with_warning_dialog(url);
+		return false;
+	};
+	NotificationData data{NotificationType::BBLBedHeatSoakInfo, NotificationLevel::WarningNotificationLevel, 0, text, _u8L("Wiki for details."), callback};
+	auto notification = std::make_unique<NotificationManager::PopNotification>(data, m_id_provider, m_evt_handler);
+	notification->set_Multiline(true);
+	push_notification_data(std::move(notification), 0);
+}
+
+void NotificationManager::close_bed_heat_soak_notification()
+{
+	close_notification_of_type(NotificationType::BBLBedHeatSoakInfo);
 }
 
 void NotificationManager::push_flushing_volume_error_notification(NotificationType type, NotificationLevel level, const std::string &text, const std::string &hypertext, std::function<bool(wxEvtHandler *)> callback)
@@ -2288,7 +2323,11 @@ void NotificationManager::update_slicing_notif_dailytips(bool need_change)
 			SlicingProgressNotification* spn = dynamic_cast<SlicingProgressNotification*>(notification.get());
 			if (need_change) {
 				wxGetApp().plater()->get_dailytips()->close();
-				spn->get_dailytips_panel()->retrieve_data_from_hint_database(HintDataNavigation::Random);
+				std::string high_shrinkage_filament_names;
+				if (get_high_shrinkage_filament_names(high_shrinkage_filament_names))
+					spn->get_dailytips_panel()->retrieve_data_from_hint_database(HIGH_SHRINKAGE_FILAMENT_HINT_KEY, high_shrinkage_filament_names);
+				else
+					spn->get_dailytips_panel()->retrieve_data_from_hint_database(HintDataNavigation::Random);
 				wxGetApp().plater()->get_current_canvas3D()->schedule_extra_frame(0);
 			}
 			return;
@@ -2498,11 +2537,10 @@ bool NotificationManager::push_notification_data(std::unique_ptr<NotificationMan
     const bool ui_ready = m_initialized && wxGetApp().initialized();
 	if (this->activate_existing(notification.get())) {
 		if (ui_ready) { // ignore update action until both notification manager and GUI/ImGui are ready
-			if (notification->get_type() == NotificationType::SlicingWarning) {
-				m_pop_notifications.back()->append(notification->get_data().ori_text);
-			} else {
+			// SlicingWarning duplicates are suppressed in activate_existing(): one notification
+			// per warning category; the jump-to hyperlink can only target one object.
+			if (notification->get_type() != NotificationType::SlicingWarning)
                 m_pop_notifications.back()->update(notification->get_data());
-            }
 		}
 	} else {
 		m_pop_notifications.emplace_back(std::move(notification));
@@ -2549,12 +2587,16 @@ void NotificationManager::render_notifications(GLCanvas3D &canvas, float overlay
 
 	int i = 0;
 	for (const auto& notification : m_pop_notifications) {
+        // Reset each frame; render()/bbl_render_block_notification() set it back
+        // to true (with the cached rect) only for notifications actually drawn.
+        notification->set_not_rendered();
         if (m_canvas_type == GLCanvas3D::ECanvasType::CanvasAssembleView) {
             if (notification->get_type() != NotificationType::AssemblyInfo
                 && notification->get_type() != NotificationType::AssemblyWarning
                 && notification->get_type() != NotificationType::BBLIsolatedVolumeInfo
                 && notification->get_type() != NotificationType::BBLAssemblyFarFromOrigin
-                && notification->get_type() != NotificationType::BBLIntersectsVolumeInfo) {
+                && notification->get_type() != NotificationType::BBLIntersectsVolumeInfo
+                && notification->get_type() != NotificationType::ExportFinished) {
                 continue;
             }
         }
@@ -2713,6 +2755,9 @@ void NotificationManager::set_canvas_type(GLCanvas3D::ECanvasType t_canvas_type)
             notification->hide(m_canvas_type == GLCanvas3D::ECanvasType::CanvasView3D);
         if (notification->get_type() == NotificationType::BBLObjectInfo)
             notification->hide(m_canvas_type != GLCanvas3D::ECanvasType::CanvasView3D);
+        if (notification->get_type() == NotificationType::BBLBedHeatSoakInfo)
+            notification->hide(m_canvas_type != GLCanvas3D::ECanvasType::CanvasView3D &&
+                               m_canvas_type != GLCanvas3D::ECanvasType::CanvasPreview);
         if (notification->get_type() == NotificationType::BBLSeqPrintInfo)
             notification->hide(m_canvas_type != GLCanvas3D::ECanvasType::CanvasView3D);
         if ((m_canvas_type == GLCanvas3D::ECanvasType::CanvasPreview) && notification->get_type() == NotificationType::DidYouKnowHint)
@@ -2762,6 +2807,15 @@ size_t NotificationManager::get_notification_count() const
 			ret++;
 	}
 	return ret;
+}
+
+bool NotificationManager::is_point_over_any_notification(const ImVec2 &point) const
+{
+	for (const std::unique_ptr<PopNotification>& notification : m_pop_notifications) {
+		if (notification->contains_point(point))
+			return true;
+	}
+	return false;
 }
 
 void NotificationManager::bbl_show_plateinfo_notification(const std::string &text)

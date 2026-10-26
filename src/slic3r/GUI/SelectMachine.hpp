@@ -39,6 +39,7 @@
 #include "PrePrintChecker.hpp"
 #include "Widgets/Label.hpp"
 #include "Widgets/Button.hpp"
+#include "Widgets/StaticBox.hpp"
 #include "Widgets/CheckBox.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/ScrolledWindow.hpp"
@@ -54,6 +55,7 @@
 // Previous definitions
 namespace Slic3r{
     class DevExtder;
+    struct GCodeProcessorResult;
 }
 
 namespace Slic3r { namespace GUI {
@@ -202,6 +204,8 @@ private:
     ScalableButton     *m_printoption_tips{ nullptr };
     PrintOptionItem    *m_printoption_item{nullptr};
     wxString           m_full_title;
+    std::function<void()> m_tips_click_callback;
+    bool               m_tips_clickable{false};
 
 public:
     PrintOption(wxWindow *parent, wxString title, wxString tips, std::vector<POItem> ops, std::string param = "");
@@ -223,6 +227,7 @@ public:
     void        update_title_display();
     void        update_tooltip_options_area(const wxString& opt_tips);// options area tips
     void        insert_extra_widget(wxWindow* widget); // insert after title, before tips
+    void        set_tips_clickable(bool clickable, std::function<void()> callback = nullptr);
 
     void  msw_rescale();
 
@@ -233,6 +238,7 @@ private:
     void OnPaint(wxPaintEvent &event);
     void render(wxDC &dc);
     void doRender(wxDC &dc);
+    void OnTipsButtonClicked(wxCommandEvent &event);
 };
 
 class ThumbnailPanel : public wxPanel
@@ -285,6 +291,7 @@ private:
 struct pPresetFilaInfo
 {
     std::string filament_id;
+    std::string setting_id;
     std::string filament_type;
     std::string filament_display_type;
     std::string filament_vendor;
@@ -400,6 +407,7 @@ protected:
     wxSimplebook*                       m_simplebook{nullptr};
     wxStaticText*                       m_rename_text{nullptr};
     Label*                              m_stext_time{ nullptr };
+    Label*                              m_time_estimate_tip{ nullptr };
     Label*                              m_stext_weight{ nullptr };
     Label*                              m_saveTimeText{ nullptr };
     PrinterMsgPanel *                   m_statictext_ams_msg{nullptr};
@@ -480,6 +488,8 @@ public:
     void reset_timeout();
     void update_user_printer();
     void reset_ams_material();
+
+    void update_by_obj(MachineObject* obj_ = nullptr);
     void update_show_status(MachineObject* obj_ = nullptr);
 
     bool CheckErrorRackStatus(MachineObject* obj_);//return true if no errors
@@ -492,8 +502,15 @@ public:
     void CheckWarningRackStatus(MachineObject* obj_);
 
     bool CheckErrorWarningFilamentMapping(MachineObject* obj_);//return true if no errors
+    bool IsAllAmsSupportAccurateRemain(MachineObject* obj_) const; // all AMS report accurate remain version
     bool CheckWarningFilamentRemain(MachineObject* obj_); // return true if no errors
     bool CheckWarningFilamentCrossExtruder(MachineObject* obj_, std::set<int>& cross_extruder_filament_ids); // return true if no warning
+    bool CheckWarningPrintTimeEstimate(MachineObject* obj_, const std::vector<FilamentInfo>& ams_mapping_result); // return true if no warning
+
+    // Smart nozzle clumping (wrap) detection: when fun2[15] is supported, the project
+    // contains a stringing-prone filament and the printer is not yet in Auto mode,
+    // recommend switching to Auto. Returns true if no warning. See figma N1-9 #10100-23113.
+    bool CheckWarningSmartNozzleBlobAuto(MachineObject* obj_);
 
     void update_best_pos_dialog(wxCommandEvent &evt);
     void update_ams_check(MachineObject* obj);
@@ -604,6 +621,8 @@ private:
     void update_option_opts(MachineObject *obj);
     void update_options_layout();
 
+    void timelapse_button_click();
+
     // save and restore from config
     void load_option_vals(MachineObject* obj);            // read from config, call once on open/switch machine
     void update_option_dynamic_state(MachineObject* obj); // update dynamic state (timelapse, tooltips), call in timer
@@ -637,7 +656,14 @@ private:
 
 
 
-    void refresh_save_time(MachineObject *obj);
+    // update time
+    bool support_filament_mapping_estimate() const;
+    void update_time_estimate_tip(bool show);
+    void refresh_print_time(MachineObject *obj);
+    void set_print_time_display(float sliced_seconds, float display_seconds);
+    void refresh_print_time_normal(MachineObject* obj, float sliced_seconds);
+    void refresh_print_time_ams_mapping(MachineObject* obj, const GCodeProcessorResult* slice_result, float sliced_seconds);
+    void update_save_time_hint(MachineObject* obj, const std::optional<float>& save_time);
 
     bool has_bowden_extuder(MachineObject *obj);
 };
@@ -677,7 +703,15 @@ private:
     Label*         m_text_bed_type;
 };
 
-class NozzleStatePanel : public wxPanel
+// One nozzle row: rack machines use the whole row, others split it to highlight one part
+struct NozzleRowLabels
+{
+    Label* whole    = nullptr;
+    Label* diameter = nullptr;
+    Label* flow     = nullptr;
+};
+
+class NozzleStatePanel : public StaticBox
 {
 public:
     NozzleStatePanel(wxWindow* parent);
@@ -691,16 +725,19 @@ private:
                     const ExtruderNozzleInfos& machine_nozzle_infos);
     void UpdateGui();
     void UpdateLabelColour();
+    void AppendNozzleRows(wxSizer* vbox, int ext_id, bool slicing_side);
 
 private:
     ExtruderNozzleInfos m_slicing_nozzles;
     ExtruderNozzleInfos m_installed_nozzles;
     std::string         m_printer_type;
+    int                 m_total_ext_count = 1;
+    bool                m_has_rack = false;
 
     wxSizer* m_sizer;
 
-    // key(extruder_id) -> { key1(nozzle type info), val1(label)}
-    std::unordered_map<int, std::unordered_map<NozzleDef, Label*>> m_slicing_labels;
+    // key(extruder_id) -> { key1(nozzle type info), val1(labels)}
+    std::unordered_map<int, std::unordered_map<NozzleDef, NozzleRowLabels>> m_slicing_labels;
 };
 
 wxDECLARE_EVENT(EVT_SWITCH_PRINT_OPTION, wxCommandEvent);

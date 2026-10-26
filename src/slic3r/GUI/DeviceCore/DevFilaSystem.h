@@ -34,6 +34,15 @@ enum DevFilaColorType : int
 class DevAmsTray
 {
 public:
+    enum class RemainFetchStatus : int
+    {
+        Done         = 0,
+        Refreshing   = 1,
+        CloudTimeout = 2,
+        CloudNoData  = 3,
+        Initializing = 4,
+    };
+
     DevAmsTray(std::string tray_id)
     {
         is_bbl = false;
@@ -59,16 +68,19 @@ public:
     std::string              nozzle_temp_min;
     std::string              xcam_info;
     std::string              uuid;
+    std::string              tray_id_name;
     DevFilaColorType         ctype = DevFilaColorType::CTYPE_SINGLE;
     float                    k        = 0.0f; // k range: 0 ~ 0.5
     float                    n        = 0.0f; // k range: 0.6 ~ 2.0
-    int                      cali_idx = -1;   // - 1 means default
+    int                      cali_idx             = -1;  // - 1 means default
+    RemainFetchStatus        remain_fetch_status  = RemainFetchStatus::Done; // bits[5-7] of MQTT "state" field
 
     wxColour        wx_color;
     bool            is_bbl;
     bool            is_exists = false;
     int             hold_count = 0;
     int             remain = 0;         // filament remain: 0 ~ 100
+    int             remain_g = -1;      // accurate remaining weight in grams; -1 means not edited / not provided by firmware
 
     std::optional<int>                      current_extruder_id;// the ams is used on the extruder currently
     std::set<int>                           binded_extruder_set;// the ams can be used on the binded extruders
@@ -146,6 +158,12 @@ public:
         On = 1,
     };
 
+    enum class RemainEstimateVersion : int
+    {
+        Legacy   = 0,   // Legacy: coarse estimate.
+        Accurate = 1,   // Accurate: O1D U4 precise estimate.
+    };
+
     enum class CannotDryReason : int
     {
         TaskOccupied = 0,
@@ -169,19 +187,21 @@ public:
 
 public:
     DevAms(std::shared_ptr<DevFilaSystem> owner, const std::string& ams_id, const std::set<int>& binded_extruder_set, DevAmsType type);
-    DevAms(std::shared_ptr<DevFilaSystem> owner, const std::string& ams_id, const std::set<int>& binded_extruder_set, int type);
     ~DevAms();
 
 public:
     std::string GetAmsId() const { return m_ams_id; }
     wxString    GetDisplayName() const; // display
 
-    void     SetAmsType(int type) { m_ams_type = (DevAmsType) type; }
-    void     SetAmsType(DevAmsType type) { m_ams_type = type; }
-    DevAmsType  GetAmsType() const { return m_ams_type;}
+    void       SetAmsType(int type) { m_ams_type = (DevAmsType) type; }
+    void       SetAmsType(DevAmsType type) { m_ams_type = type; }
+    DevAmsType GetAmsType() const { return m_ams_type == DevAmsType::AMS_LITE_MIXED ? DevAmsType::AMS_LITE : m_ams_type; }
 
     // exist or not
     bool  IsExist() const { return m_exist; }
+
+    // mixed ams lite for N9
+    bool IsAmsLiteMixed() const { return m_ams_type == DevAmsType::AMS_LITE_MIXED; }
 
     // slots
     int   GetSlotCount() const;
@@ -224,6 +244,8 @@ public:
 
     bool AmsIsDrying();
 
+    RemainEstimateVersion GetRemainEstimateVersion() const { return m_remain_estimate_version; }
+
 private:
     std::weak_ptr<DevFilaSystem> m_fila_system;
 
@@ -256,6 +278,7 @@ private:
     std::optional<DryFanStatus> m_dry_fan2_status;
     std::optional<std::vector<CannotDryReason>> m_dry_cannot_reasons;
     std::optional<DrySettings> m_dry_settings;
+    RemainEstimateVersion m_remain_estimate_version = RemainEstimateVersion::Legacy;
 };
 
 class DevFilaSystem
@@ -313,7 +336,6 @@ public:
     // crtl
     int  CtrlAmsStartDryingHour(int ams_id, std::string filament_type, int tag_temp, int tag_duration_hour, bool rotate_tray, int cooling_temp, bool close_power_conflict = false) const;
     int  CtrlAmsStopDrying(int ams_id) const;
-
 
 public:
     static bool IsBBL_Filament(std::string tag_uid);

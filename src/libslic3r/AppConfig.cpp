@@ -134,6 +134,8 @@ void AppConfig::set_defaults()
             set_bool("single_instance", false);
         if (get("import_3mf_as_project").empty())
             set_bool("import_3mf_as_project", true);
+        if (get("show_bed_heat_soak_area").empty())
+            set_bool("show_bed_heat_soak_area", true);
 #ifdef SUPPORT_REMEMBER_OUTPUT_PATH
         if (get("remember_output_path").empty())
             set_bool("remember_output_path", true);
@@ -209,6 +211,8 @@ void AppConfig::set_defaults()
         set_bool("user_bed_type", true);
     if (get("grabber_size_factor").empty())
         set("grabber_size_factor", "1.0");
+    if (get("assembly_part_number_label_font_size").empty())
+        set("assembly_part_number_label_font_size", "0");
     if (get("3d_middle_tooltip_offset_x").empty())
         set("3d_middle_tooltip_offset_x", "0.0");
     if (get("3d_middle_tooltip_offset_y").empty())
@@ -225,6 +229,14 @@ void AppConfig::set_defaults()
         set("custom_back_font_name", "");
     if (get("enable_multi_machine").empty())
         set_bool("enable_multi_machine", false);
+
+    if (get("studio_enable_fila_manager").empty()) {
+#ifdef __APPLE__
+        set_bool("studio_enable_fila_manager", false);
+#else
+        set_bool("studio_enable_fila_manager", true);
+#endif
+    }
 
     if (get("enable_record_gcodeviewer_option_item").empty())
         set_bool("enable_record_gcodeviewer_option_item", false);
@@ -283,6 +295,9 @@ void AppConfig::set_defaults()
     if (get("internal_developer_mode").empty())
         set_bool("internal_developer_mode", false);
 
+    if (get("enable_webview_devtools").empty())
+        set_bool("enable_webview_devtools", false);
+
     if (get("disable_auto_flow_cali_tips").empty())
         set_bool("disable_auto_flow_cali_tips", false);
 
@@ -318,6 +333,10 @@ void AppConfig::set_defaults()
 
     if (get("enable_high_low_temp_mixed_printing").empty()){
         set_bool("enable_high_low_temp_mixed_printing", false);
+    }
+
+    if (get("camera_fullscreen_active_monitor_only").empty()){
+        set_bool("camera_fullscreen_active_monitor_only", true);
     }
 
     if (get("ignore_ext_filament_in_filament_map").empty()){
@@ -475,8 +494,19 @@ void AppConfig::set_defaults()
     if (get("is_split_compound").empty()) {
         set_bool("is_split_compound", false);
     }
-    if (get("play_slicing_video").empty()) {
-        set_bool("play_slicing_video", true);
+    // Dual-extruder first-slice guide: per printer_model (H2D / H2D Pro / H2C); migrate legacy global play_slicing_video.
+    {
+        static const char* dual_extruder_slice_guide_models[] = { "Bambu Lab H2D", "Bambu Lab H2D Pro", "Bambu Lab H2C" };
+        const std::string  legacy_sv                            = get("play_slicing_video");
+        for (const char* model : dual_extruder_slice_guide_models) {
+            const std::string k = dual_extruder_first_slice_video_app_config_key(model);
+            if (get(k).empty()) {
+                if (!legacy_sv.empty())
+                    set(k, legacy_sv);
+                else
+                    set_bool(k, true);
+            }
+        }
     }
     if (get("show_fila_switch_tips").empty()) {
         set_bool("show_fila_switch_tips", true);

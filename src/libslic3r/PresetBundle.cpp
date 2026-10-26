@@ -53,12 +53,14 @@ static std::vector<std::string> s_project_options {
     "wipe_tower_rotation_angle",
     "curr_bed_type",
     "flush_multiplier",
+    "flush_multiplier_fast",
     "nozzle_volume_type",
     "filament_map_mode",
     "filament_map",
     "filament_volume_map",
     "filament_nozzle_map",
     "extruder_nozzle_stats",
+    "extruder_nozzle_stats_new",
     "prime_volume_mode",
     "enable_filament_dynamic_map",
     "filament_is_mixed",
@@ -66,6 +68,8 @@ static std::vector<std::string> s_project_options {
     "filament_mixed_sublayer_ratios",
     "filament_mixed_gradient",
     "filament_mixed_gradient_range",
+    "filament_mixed_gradient_curve",
+    "filament_mixed_gradient_per_part",
     "has_filament_switcher"
 };
 
@@ -383,7 +387,7 @@ PresetBundle::PresetBundle()
         auto& default_config = this->filaments.default_preset().config;
         for(const std::string& opt_key : default_config.keys()){
             ConfigOption* opt = default_config.optptr(opt_key, false);
-            bool is_override_key = std::find(filament_extruder_override_keys.begin(),filament_extruder_override_keys.end(), opt_key) != filament_extruder_override_keys.end();
+            bool is_override_key = is_filament_extruder_override_key(opt_key);
             if(!is_override_key || !opt->nullable())
                 continue;
             opt->deserialize("nil",ForwardCompatibilitySubstitutionRule::Disable);
@@ -1069,7 +1073,7 @@ PresetsConfigSubstitutions PresetBundle::import_presets(std::vector<std::string>
                 if (status) {
                     std::string file_name = file_stat.m_filename;
                     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << " Form zip file: " << file << ". Read file name: " << file_stat.m_filename;
-                    size_t index = file_name.find_last_of('/');
+                    size_t index = file_name.find_last_of("/\\");
                     if (std::string::npos != index) {
                         file_name = file_name.substr(index + 1);
                     }
@@ -1155,7 +1159,16 @@ bool PresetBundle::import_json_presets(PresetsConfigSubstitutions &            s
         }
         if (inherit_preset) {
             new_config = inherit_preset->config;
-            new_config.apply(std::move(config));
+            // Merge child diff onto parent the same way PresetCollection::load_presets() does,
+            // so that "nil" sentinel slots in nullable variant arrays (e.g.
+            // nozzle_temperature == ["270","nil"]) fall back to the parent's value instead of
+            // leaking INT_MAX into the active config via DynamicPrintConfig::apply().
+            std::string            extruder_id_name, extruder_variant_name;
+            std::set<std::string> *key_set1 = nullptr, *key_set2 = nullptr;
+            Preset::get_extruder_names_and_keysets(collection->type(), extruder_id_name, extruder_variant_name, &key_set1, &key_set2);
+
+            extend_default_config_length(config, inherit_preset->config, false, {});
+            new_config.update_diff_values_to_child_config(config, extruder_id_name, extruder_variant_name, *key_set1, *key_set2);
         } else {
             // We support custom root preset now
             auto inherits_config2 = dynamic_cast<ConfigOptionString *>(inherits_config);
@@ -1330,7 +1343,9 @@ std::vector<std::vector<std::vector<float>>> PresetBundle::get_full_flush_matrix
     }
 
     if(with_multiplier){
-        auto flush_multiplies = project_config.option<ConfigOptionFloats>("flush_multiplier")->values;
+        bool use_fast         = project_config.option<ConfigOptionEnum<PrimeVolumeMode>>("prime_volume_mode")->value == PrimeVolumeMode::pvmFast;
+        auto flush_multiplies = use_fast ? project_config.option<ConfigOptionFloats>("flush_multiplier_fast")->values :
+                                           project_config.option<ConfigOptionFloats>("flush_multiplier")->values;
         flush_multiplies.resize(extruder_nums, 1);
         for (size_t extruder_id = 0; extruder_id < extruder_nums; ++extruder_id) {
             for (auto& vec : matrix[extruder_id]) {
@@ -1422,7 +1437,7 @@ int PresetBundle::validate_presets(const std::string &file_name, DynamicPrintCon
 
 void PresetBundle::remove_users_preset(AppConfig &config, std::map<std::string, std::map<std::string, std::string>> *my_presets)
 {
-    auto check_removed = [my_presets, this](Preset &preset) -> bool {
+    auto check_removed = [my_presets](Preset &preset) -> bool {
         if (my_presets == nullptr) return true;
         if (my_presets->find(preset.name) != my_presets->end()) return false;
         if (!preset.sync_info.empty()) return false; // syncing, not remove
@@ -1433,6 +1448,8 @@ void PresetBundle::remove_users_preset(AppConfig &config, std::map<std::string, 
             return false;
         }
         preset.remove_files();
+        BOOST_LOG_TRIVIAL(warning) << __FUNCTION__
+                                   << boost::format("preset removed, name: %1%, type: %2%, user_id: %3%") % preset.name % Preset::get_type_string(preset.type) % preset.user_id;
         return true;
     };
     std::string preset_folder_user_id = config.get("preset_folder");
@@ -1440,12 +1457,10 @@ void PresetBundle::remove_users_preset(AppConfig &config, std::map<std::string, 
     bool need_reset_printer_preset = false;
     for (auto it = printers.begin(); it != printers.end();) {
         if (it->is_user() && it->user_id.compare(preset_folder_user_id) == 0 && check_removed(*it)) {
-            BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":printers erase %1%, type %2%， user_id %3%") % it->name % Preset::get_type_string(it->type) % it->user_id;
             if (it->name == printer_selected_preset_name)
                 need_reset_printer_preset = true;
             it = printers.erase(it);
-        }
-        else {
+        } else {
             it++;
         }
     }
@@ -1471,12 +1486,10 @@ void PresetBundle::remove_users_preset(AppConfig &config, std::map<std::string, 
     // remove preset if user_id is not current user
     for (auto it = prints.begin(); it != prints.end();) {
         if (it->is_user() && it->user_id.compare(preset_folder_user_id) == 0 && check_removed(*it)) {
-            BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":prints erase %1%, type %2%， user_id %3%")%it->name %Preset::get_type_string(it->type) %it->user_id;
             if (it->name == selected_print_name)
                 need_reset_print_preset = true;
             it = prints.erase(it);
-        }
-        else {
+        } else {
             it++;
         }
     }
@@ -1491,12 +1504,10 @@ void PresetBundle::remove_users_preset(AppConfig &config, std::map<std::string, 
     bool need_reset_filament_preset = false;
     for (auto it = filaments.begin(); it != filaments.end();) {
         if (it->is_user() && it->user_id.compare(preset_folder_user_id) == 0 && check_removed(*it)) {
-            BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":filaments erase %1%, type %2%， user_id %3%")%it->name %Preset::get_type_string(it->type) %it->user_id;
             if (it->name == selected_filament_name)
                 need_reset_filament_preset = true;
             it = filaments.erase(it);
-        }
-        else {
+        } else {
             it++;
         }
     }
@@ -1883,7 +1894,7 @@ void PresetBundle::load_installed_filaments(AppConfig &config)
                         {
                             //already has compatible filament
                             add_default_materials = false;
-                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": printer %1% vendor %2% already has default filament %3%")%printer.name %printer.vendor %filament_iter.first;
+                            BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": printer %1% vendor %2% already has default filament %3%")%printer.name %printer.vendor->name %filament_iter.first;
                             break;
                         }
                     }
@@ -2105,6 +2116,11 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
         auto flush_multipliers = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
         project_config.option<ConfigOptionFloats>("flush_multiplier")->values = std::vector<double>(flush_multipliers.begin(), flush_multipliers.end());
     }
+    if (config.has("app", "flush_multiplier_fast")) {
+        boost::algorithm::split(matrix, config.get("app", "flush_multiplier_fast"), boost::algorithm::is_any_of("|"));
+        auto flush_multipliers_fast                                                = matrix | boost::adaptors::transformed(boost::lexical_cast<double, std::string>);
+        project_config.option<ConfigOptionFloats>("flush_multiplier_fast")->values = std::vector<double>(flush_multipliers_fast.begin(), flush_multipliers_fast.end());
+    }
 
     // Mixed filament metadata
     size_t n_filaments = filament_presets.size();
@@ -2141,6 +2157,44 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
         boost::algorithm::split(parts, config.get("presets", "filament_mixed_gradient_range"), boost::algorithm::is_any_of("|"));
         parts.resize(n_filaments);
         project_config.option<ConfigOptionStrings>("filament_mixed_gradient_range")->values = parts;
+    }
+    {
+        // Old projects may not contain filament_mixed_gradient_curve; resize unconditionally.
+        auto& vals = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_curve")->values;
+        if (config.has("presets", "filament_mixed_gradient_curve")) {
+            const std::string raw = config.get("presets", "filament_mixed_gradient_curve");
+            // New format: C-style escaped ";" (escape_strings_cstyle), safe for curve values
+            // that contain "|" (the intra-slot control-point delimiter). Legacy format used
+            // "|" as the inter-slot delimiter, which collided with the intra-slot "|" and
+            // split multi-point curves across slots. Disambiguate by size: the new format
+            // always round-trips to exactly n_filaments elements; a legacy "|" split of a
+            // corrupted curve yields != n_filaments. Invariant: a non-empty curve implies a
+            // mixed gradient slot, which requires n_filaments >= 3, so the new format's
+            // escaped form always contains ";" and unescapes to size == n_filaments.
+            std::vector<std::string> parts;
+            if (Slic3r::unescape_strings_cstyle(raw, parts) && parts.size() == n_filaments) {
+                vals = std::move(parts);
+            } else {
+                std::vector<std::string> legacy_parts;
+                boost::algorithm::split(legacy_parts, raw, boost::algorithm::is_any_of("|"));
+                vals = std::move(legacy_parts);
+            }
+        }
+        vals.resize(n_filaments, std::string{});
+        // Heal legacy corruption: clear any non-empty slot that ended up with < 2 points
+        // (e.g. a curve split across slots by the old "|" delimiter). Falls back to linear.
+        Slic3r::sanitize_mixed_gradient_curve_array(vals);
+    }
+    {
+        // 兜底：旧工程没有 filament_mixed_gradient_per_part 时也保证数组长度与 n_filaments 一致
+        auto& vals = project_config.option<ConfigOptionBools>("filament_mixed_gradient_per_part")->values;
+        if (config.has("presets", "filament_mixed_gradient_per_part")) {
+            std::vector<std::string> parts;
+            boost::algorithm::split(parts, config.get("presets", "filament_mixed_gradient_per_part"), boost::algorithm::is_any_of(","));
+            vals.clear();
+            for (auto& p : parts) vals.push_back(p == "1");
+        }
+        vals.resize(n_filaments, false);
     }
 
     // Update visibility of presets based on their compatibility with the active printer.
@@ -2255,6 +2309,11 @@ void PresetBundle::export_selections(AppConfig &config)
                                                                   boost::adaptors::transformed(static_cast<std::string (*)(double)>(std::to_string)),
                                                               "|");
     config.set("flush_multiplier", flush_multiplier_str);
+    std::string flush_multiplier_fast_str = boost::algorithm::join(project_config.option<ConfigOptionFloats>("flush_multiplier_fast")->values |
+                                                                       boost::adaptors::transformed(static_cast<std::string (*)(double)>(std::to_string)),
+                                                                   "|");
+    config.set("flush_multiplier_fast", flush_multiplier_fast_str);
+
 
     // Mixed filament metadata
     if (auto* opt = project_config.option<ConfigOptionBools>("filament_is_mixed")) {
@@ -2279,6 +2338,20 @@ void PresetBundle::export_selections(AppConfig &config)
     }
     if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_range"))
         config.set("presets", "filament_mixed_gradient_range", boost::algorithm::join(opt->values, "|"));
+    if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_curve"))
+        // Use C-style escaped ";" encoding (same as ConfigOptionStrings::serialize) instead
+        // of "|" join: each slot's curve value may itself contain "|" as the control-point
+        // delimiter (serialize_gradient_curve), which would collide with "|" as the inter-
+        // slot delimiter and split the curve across slots on the next load_selections.
+        config.set("presets", "filament_mixed_gradient_curve", Slic3r::escape_strings_cstyle(opt->values));
+    if (auto* opt = project_config.option<ConfigOptionBools>("filament_mixed_gradient_per_part")) {
+        std::string s;
+        for (size_t i = 0; i < opt->values.size(); ++i) {
+            if (i > 0) s += ",";
+            s += (opt->values[i] ? "1" : "0");
+        }
+        config.set("presets", "filament_mixed_gradient_per_part", s);
+    }
 
     // BBS
     //config.set("presets", "sla_print",    sla_prints.get_selected_preset_name());
@@ -2316,13 +2389,17 @@ void PresetBundle::set_num_filaments(unsigned int n, std::string new_color)
     if (auto* opt = project_config.option<ConfigOptionBools>("filament_is_mixed"))
         opt->values.resize(n, false);
     if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_components"))
-        opt->resize(n);
+        opt->values.resize(n, std::string{});
     if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios"))
-        opt->resize(n);
+        opt->values.resize(n, std::string{});
     if (auto* opt = project_config.option<ConfigOptionBools>("filament_mixed_gradient"))
         opt->values.resize(n, false);
     if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_range"))
-        opt->resize(n);
+        opt->values.resize(n, std::string{});
+    if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_curve"))
+        opt->values.resize(n, std::string{});
+    if (auto* opt = project_config.option<ConfigOptionBools>("filament_mixed_gradient_per_part"))
+        opt->values.resize(n, false);
 
     //BBS set new filament color to new_color
     if (old_filament_count < n) {
@@ -2406,6 +2483,10 @@ void PresetBundle::update_num_filaments(unsigned int to_del_flament_id)
     if (auto* opt = project_config.option<ConfigOptionBools>("filament_mixed_gradient"))
         erase_or_resize(opt->values);
     if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_range"))
+        erase_or_resize(opt->values);
+    if (auto* opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_curve"))
+        erase_or_resize(opt->values);
+    if (auto* opt = project_config.option<ConfigOptionBools>("filament_mixed_gradient_per_part"))
         erase_or_resize(opt->values);
 
     update_multi_material_filament_presets(to_del_flament_id);
@@ -2603,6 +2684,10 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
                                                         L("The filament model is unknown. A random filament preset will be used.")));
             filament_id = iter->filament_id;
         }
+        // A filament that the machine actually uses should be enabled (installed)
+        // in Studio even if the user never ticked it in the filament preferences,
+        // otherwise it stays hidden in the filament settings dropdown after sync.
+        iter->is_visible = true;
         ams_filament_presets.push_back(iter->name);
         ams_filament_colors.push_back(filament_color);
         ams_filament_color_types.push_back(filament_color_type);
@@ -2625,6 +2710,8 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
         std::string mixed_sublayer_ratios;
         bool        mixed_gradient = false;
         std::string mixed_gradient_range;
+        std::string mixed_gradient_curve;
+        bool        mixed_gradient_per_part = false;
     };
     std::vector<MixedSlotSnapshot> mixed_snapshots;
     auto* is_mixed_opt         = project_config.option<ConfigOptionBools>("filament_is_mixed");
@@ -2632,6 +2719,8 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
     auto* mixed_ratios_opt     = project_config.option<ConfigOptionStrings>("filament_mixed_sublayer_ratios");
     auto* mixed_gradient_opt   = project_config.option<ConfigOptionBools>("filament_mixed_gradient");
     auto* mixed_grad_range_opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_range");
+    auto* mixed_grad_curve_opt = project_config.option<ConfigOptionStrings>("filament_mixed_gradient_curve");
+    auto* mixed_per_part_opt   = project_config.option<ConfigOptionBools>("filament_mixed_gradient_per_part");
     if (is_mixed_opt) {
         for (size_t i = 0; i < is_mixed_opt->values.size() && i < this->filament_presets.size(); ++i) {
             if (!is_mixed_opt->values[i])
@@ -2644,6 +2733,8 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
             if (mixed_ratios_opt   && i < mixed_ratios_opt->values.size())   snap.mixed_sublayer_ratios = mixed_ratios_opt->values[i];
             if (mixed_gradient_opt && i < mixed_gradient_opt->values.size()) snap.mixed_gradient        = mixed_gradient_opt->values[i];
             if (mixed_grad_range_opt && i < mixed_grad_range_opt->values.size()) snap.mixed_gradient_range = mixed_grad_range_opt->values[i];
+            if (mixed_grad_curve_opt && i < mixed_grad_curve_opt->values.size()) snap.mixed_gradient_curve = mixed_grad_curve_opt->values[i];
+            if (mixed_per_part_opt && i < mixed_per_part_opt->values.size()) snap.mixed_gradient_per_part = mixed_per_part_opt->values[i];
             mixed_snapshots.push_back(snap);
         }
         if (!mixed_snapshots.empty()) {
@@ -2658,6 +2749,8 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
             if (mixed_ratios_opt)     mixed_ratios_opt->values.resize(phys_count);
             if (mixed_gradient_opt)   mixed_gradient_opt->values.resize(phys_count);
             if (mixed_grad_range_opt) mixed_grad_range_opt->values.resize(phys_count);
+            if (mixed_grad_curve_opt) mixed_grad_curve_opt->values.resize(phys_count);
+            if (mixed_per_part_opt)   mixed_per_part_opt->values.resize(phys_count);
         }
     }
 
@@ -2722,6 +2815,7 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
                     BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << "check error: array bound (check append)";
                     continue;
                 }
+                ams_infos[i].filament_color_type  = ams_filament_color_types[i];
                 ams_infos[i].filament_preset = ams_filament_presets[i];
                 ams_infos[i].mutli_filament_color = ams_multi_color_filment[i];
                 if (!ams_infos[i].is_map) {
@@ -2804,6 +2898,8 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
         if (mixed_ratios_opt)     mixed_ratios_opt->values.resize(new_phys_count);
         if (mixed_gradient_opt)   mixed_gradient_opt->values.resize(new_phys_count, (unsigned char)false);
         if (mixed_grad_range_opt) mixed_grad_range_opt->values.resize(new_phys_count);
+        if (mixed_grad_curve_opt) mixed_grad_curve_opt->values.resize(new_phys_count);
+        if (mixed_per_part_opt)   mixed_per_part_opt->values.resize(new_phys_count, (unsigned char)false);
 
         for (auto& snap : mixed_snapshots) {
             this->filament_presets.push_back(snap.preset);
@@ -2816,6 +2912,8 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
             if (mixed_ratios_opt)     mixed_ratios_opt->values.push_back(snap.mixed_sublayer_ratios);
             if (mixed_gradient_opt)   mixed_gradient_opt->values.push_back((unsigned char)snap.mixed_gradient);
             if (mixed_grad_range_opt) mixed_grad_range_opt->values.push_back(snap.mixed_gradient_range);
+            if (mixed_grad_curve_opt) mixed_grad_curve_opt->values.push_back(snap.mixed_gradient_curve);
+            if (mixed_per_part_opt)   mixed_per_part_opt->values.push_back((unsigned char)snap.mixed_gradient_per_part);
         }
     }
 
@@ -5390,6 +5488,15 @@ VendorProfile::PrinterModel PresetBundle::load_vendor_configs_from_json(const st
                 model.bottom_texture_rect = it.value();
             } else if (boost::iequals(it.key(), BBL_JSON_KEY_BOTTOM_TEXTURE_RECT_LONGER)) {
                 model.bottom_texture_rect_longer = it.value();
+            } else if (boost::iequals(it.key(), BBL_JSON_KEY_BOTTOM_TEXTURE_RECT_LONGER_IGNORE_LIST)) {
+                std::string longer_ignore_field = it.value();
+                if (Slic3r::unescape_strings_cstyle(longer_ignore_field, model.bottom_texture_rect_longer_ignore_list)) {
+                    Slic3r::sort_remove_duplicates(model.bottom_texture_rect_longer_ignore_list);
+                    if (!model.bottom_texture_rect_longer_ignore_list.empty() && model.bottom_texture_rect_longer_ignore_list.front().empty())
+                        model.bottom_texture_rect_longer_ignore_list.erase(model.bottom_texture_rect_longer_ignore_list.begin());
+                } else {
+                    BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << boost::format(": invalid bottom_texture_rect_longer_ignore_list %1% for Vendor") % longer_ignore_field;
+                }
             } else if (boost::iequals(it.key(), BBL_JSON_KEY_MIDDLE_TEXTURE_RECT)) {
                 model.middle_texture_rect = it.value();
             } else if (boost::iequals(it.key(), BBL_JSON_KEY_USE_RECT_GRID)) {
@@ -5423,6 +5530,8 @@ VendorProfile::PrinterModel PresetBundle::load_vendor_configs_from_json(const st
                 }
             } else if (boost::iequals(it.key(), BBL_JSON_KEY_SUPPORT_SIDE_PANEL_FAN)) {
                 model.support_side_panel_fan = it.value();
+            } else if (boost::iequals(it.key(), BBL_JSON_KEY_RESOURCE_BIND_NAME)) {
+                model.resource_bind_name = it.value();
             }
         }
     } catch (nlohmann::detail::parse_error &err) {
@@ -5471,6 +5580,8 @@ void PresetBundle::update_multi_material_filament_presets(size_t to_delete_filam
     if (old_nozzle_nums != nozzle_nums) {
         std::vector<double>& f_multiplier = this->project_config.option<ConfigOptionFloats>("flush_multiplier")->values;
         f_multiplier.resize(nozzle_nums, 1.f);
+        std::vector<double> &f_multiplier_fast = this->project_config.option<ConfigOptionFloats>("flush_multiplier_fast")->values;
+        f_multiplier_fast.resize(nozzle_nums, 1.2f);
     }
 
     if ( (num_filaments * num_filaments) != size_t(old_matrix.size() / old_nozzle_nums) ) {

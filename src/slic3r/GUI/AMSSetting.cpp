@@ -128,7 +128,7 @@ void AMSSetting::create()
     m_sizer_starting_tip_inline = new wxBoxSizer(wxVERTICAL);
 
     m_tip_starting_line1 = new Label(m_panel_body,
-        _L("The AMS will automatically read the information of inserted filament on start-up. It will take about 1 minute.The reading process will roll filament spools.")
+        _L("The AMS will automatically read the information of inserted filament on start-up. It will take about 1 minute. The reading process will roll filament spools.")
     );
     m_tip_starting_line1->SetFont(::Label::Body_13);
     m_tip_starting_line1->SetForegroundColour(AMS_SETTING_GREY700);
@@ -240,7 +240,7 @@ void AMSSetting::create()
 
 
     // panel img
-    wxPanel* m_panel_img = new wxPanel(m_panel_body, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+    m_panel_img = new wxPanel(m_panel_body, wxID_ANY, wxDefaultPosition, wxDefaultSize);
     m_panel_img->SetBackgroundColour(AMS_SETTING_GREY200);
     wxBoxSizer *m_sizer_img = new wxBoxSizer(wxVERTICAL);
     m_am_img = new wxStaticBitmap(m_panel_img, wxID_ANY, create_scaled_bitmap("ams_icon", nullptr, 126), wxDefaultPosition, wxDefaultSize);
@@ -418,7 +418,12 @@ void AMSSetting::update_ams_img(MachineObject* obj_)
 
     const auto& print_jj = DevPrinterConfigUtil::get_json_from_config(obj_->printer_type, "print");
     if (print_jj.contains("support_ams_settings_hide_image") && DevJsonValParser::GetVal<bool>(print_jj, "support_ams_settings_hide_image", false)) {
+        // Hide the whole image panel; hiding only m_am_img leaves an empty grey
+        // panel that still fills the remaining space (added with proportion 1).
         m_am_img->Hide();
+        m_panel_img->Hide();
+        Layout();
+        Fit();
         return;
     }
 
@@ -440,6 +445,7 @@ void AMSSetting::update_ams_img(MachineObject* obj_)
     }
 
     m_am_img->Show();
+    m_panel_img->Show();
 }
 
 void AMSSetting::update_starting_read_mode(bool selected)
@@ -758,7 +764,8 @@ void AMSSettingArrangeAMSOrder::CreateGui()
     Label* title = new Label(this, ::Label::Head_13, _L("Arrange AMS Order"));
     title->SetBackgroundColour(*wxWHITE);
 
-    Label* note = new Label(this, ::Label::Head_13, _L("If you want a specific AMS ID sequence, please disconnect all AMS after clicking 'Reset', and then reconnect them in the desired order."));
+    Label* note = new Label(this, ::Label::Head_13, _L("After clicking 'Reconnect', all AMS units will be automatically disconnected.\n"
+                                                       "Please reconnect them in the desired order to set a specific AMS ID sequence."));
     note->SetFont(::Label::Body_13);
     note->SetForegroundColour(AMS_SETTING_GREY700);
     note->SetBackgroundColour(*wxWHITE);

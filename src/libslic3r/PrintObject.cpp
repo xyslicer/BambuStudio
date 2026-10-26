@@ -321,10 +321,19 @@ std::unordered_map<int, std::unordered_map<int, double>> PrintObject::calc_estim
 {
     auto                     full_print_config             = this->print()->m_ori_full_print_config;
     std::vector<std::string> extruder_variant_list         = this->print()->config().printer_extruder_variant.values;
-    std::vector<std::string> filament_variant_list         = full_print_config.option<ConfigOptionStrings>("filament_extruder_variant")->values;
-    std::vector<int>         filament_self_idx             = full_print_config.option<ConfigOptionInts>("filament_self_index")->values;
-    std::vector<double>      filament_max_volumetric_speed = full_print_config.option<ConfigOptionFloats>("filament_max_volumetric_speed")->values;
-    std::vector<double>      filament_flow_ratio           = full_print_config.option<ConfigOptionFloats>("filament_flow_ratio")->values;
+
+    const auto* opt_filament_variant      = full_print_config.option<ConfigOptionStrings>("filament_extruder_variant");
+    const auto* opt_filament_self_idx     = full_print_config.option<ConfigOptionInts>("filament_self_index");
+    const auto* opt_filament_max_vol_spd  = full_print_config.option<ConfigOptionFloats>("filament_max_volumetric_speed");
+    const auto* opt_filament_flow_ratio   = full_print_config.option<ConfigOptionFloats>("filament_flow_ratio");
+    if (!opt_filament_variant || !opt_filament_self_idx || !opt_filament_max_vol_spd || !opt_filament_flow_ratio) {
+        BOOST_LOG_TRIVIAL(warning) << "calc_estimated_filament_print_time: filament_* config option missing, skip estimation";
+        return {};
+    }
+    std::vector<std::string> filament_variant_list         = opt_filament_variant->values;
+    std::vector<int>         filament_self_idx             = opt_filament_self_idx->values;
+    std::vector<double>      filament_max_volumetric_speed = opt_filament_max_vol_spd->values;
+    std::vector<double>      filament_flow_ratio           = opt_filament_flow_ratio->values;
 
     auto get_limit_from_volumetric_speed = [&](int filament_idx, int extruder_idx, double width, double height) {
         std::string extruder_variant = extruder_variant_list[extruder_idx];
@@ -879,14 +888,6 @@ void PrintObject::generate_support_material()
                                                                                      this->model_object()->name, reasons[sntype]);
                 this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning_message, PrintStateBase::SlicingNeedSupportOn);
             }
-
-#if 0
-            // Printing without supports. Empty layer means some objects or object parts are levitating,
-            // therefore they cannot be printed without supports.
-            for (const Layer *layer : m_layers)
-                if (layer->empty())
-                    throw Slic3r::SlicingError("Levitating objects cannot be printed without supports.");
-#endif
         }
 
         if ((this->has_support() && m_layers.size() > 1) || (this->has_raft() && !m_layers.empty())) {
@@ -1309,16 +1310,15 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "enable_overhang_speed"
             || opt_key == "detect_thin_wall"
             || opt_key == "precise_outer_wall") {
+            // filament_shrink is applied to slice contours in slice_volumes() (posSlice) using wall_filament.
+            if (opt_key == "wall_filament")
+                steps.emplace_back(posSlice);
             steps.emplace_back(posPerimeters);
             steps.emplace_back(posSupportMaterial);
         } else if (opt_key == "bridge_flow") {
-            if (m_config.support_top_z_distance > 0.) {
-            	// Only invalidate due to bridging if bridging is enabled.
-            	// If later "support_top_z_distance" is modified, the complete PrintObject is invalidated anyway.
-            	steps.emplace_back(posPerimeters);
-            	steps.emplace_back(posInfill);
-	            steps.emplace_back(posSupportMaterial);
-	        }
+            steps.emplace_back(posPerimeters);
+            steps.emplace_back(posInfill);
+	        steps.emplace_back(posSupportMaterial);
         } else if (
                 opt_key == "wall_generator"
             || opt_key == "wall_transition_length"
@@ -1394,6 +1394,7 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
     } else if (step == posPrepareInfill) {
         invalidated |= this->invalidate_steps({ posInfill, posIroning, posSimplifyWall, posSimplifyInfill });
+        invalidated |= m_print->invalidate_steps({psSkirtBrim});
     } else if (step == posInfill) {
         invalidated |= this->invalidate_steps({ posIroning, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
@@ -1510,14 +1511,22 @@ void PrintObject::detect_surfaces_type(std::vector<std::vector<SurfaceCollection
                     bool detect_top = spiral_mode || layerm->region().config().top_shell_layers;
                     bool detect_bottom = spiral_mode || layerm->region().config().bottom_shell_layers;
 
+                    // When counterbore_hole_bridging is set to "Sacrificial Layer" (chbFilled),
+                    // process_no_bridge() may have added extra fill surfaces that extend beyond the original slices.
+                    // We need to union these with the slices to ensure proper top/bottom surface detection.
+                    ExPolygons layerm_slices_surfaces = to_expolygons(layerm->slices.surfaces);
+                    if (layerm->region().config().counterbore_hole_bridging.value == chbFilled) {
+                        layerm_slices_surfaces = union_ex(layerm_slices_surfaces, to_expolygons(layerm->fill_surfaces.surfaces));
+                    }
+
                     // find top surfaces (difference between current surfaces
                     // of current layer and upper one)
                     Surfaces top;
                     if (detect_top) {
                         if (upper_layer) {
                             ExPolygons upper_slices = interface_shells ?
-                                diff_ex(layerm->slices.surfaces, upper_layer->m_regions[region_id]->slices.surfaces, ApplySafetyOffset::Yes) :
-                                diff_ex(layerm->slices.surfaces, upper_layer->lslices, ApplySafetyOffset::Yes);
+                                diff_ex(layerm_slices_surfaces, upper_layer->m_regions[region_id]->slices.surfaces, ApplySafetyOffset::Yes) :
+                                diff_ex(layerm_slices_surfaces, upper_layer->lslices, ApplySafetyOffset::Yes);
                             surfaces_append(top, opening_ex(upper_slices, offset), stTop);
                         }
                         else {
@@ -1546,7 +1555,7 @@ void PrintObject::detect_surfaces_type(std::vector<std::vector<SurfaceCollection
                             surfaces_append(
                                 bottom,
                                 opening_ex(
-                                    diff_ex(layerm->slices.surfaces, lower_layer->lslices, ApplySafetyOffset::Yes),//完全悬空
+                                    diff_ex(layerm_slices_surfaces, lower_layer->lslices, ApplySafetyOffset::Yes),//完全悬空
                                     offset),
                                 surface_type_bottom_other);
                             // if user requested internal shells, we need to identify surfaces
@@ -1558,7 +1567,7 @@ void PrintObject::detect_surfaces_type(std::vector<std::vector<SurfaceCollection
                                     bottom,
                                     opening_ex(
                                         diff_ex(
-                                            intersection(layerm->slices.surfaces, lower_layer->lslices), // 先扣掉完全悬空
+                                            intersection(layerm_slices_surfaces, lower_layer->lslices), // 先扣掉完全悬空
                                             lower_layer->m_regions[region_id]->slices.surfaces,//再扣掉同材料的区域
                                             ApplySafetyOffset::Yes),
                                         offset),
@@ -3725,7 +3734,8 @@ void PrintObject::remove_bridges_from_contacts(
     float extrusion_width,
     PolysType* overhang_regions,
     float max_bridge_length,
-    bool break_bridge)
+    bool break_bridge,
+    std::vector<std::pair<ExPolygon, int>>* overhang_regions_with_type)
 {
     // Extrusion width accounts for the roundings of the extrudates.
     // It is the maximum widh of the extrudate.
@@ -3841,6 +3851,28 @@ void PrintObject::remove_bridges_from_contacts(
     else if (typeid(overhang_regions) == typeid(Polygons*)) {
         *(Polygons*)overhang_regions = diff(*overhang_regions, all_bridges, ApplySafetyOffset::Yes);
     }
+
+    // Keep an optional typed overhang list in sync by diffing against the same bridge set.
+    // Skip items whose bbox doesn't overlap the bridges bbox to avoid unnecessary Clipper calls.
+    if (overhang_regions_with_type && !overhang_regions_with_type->empty() && !all_bridges.empty()) {
+        BoundingBox bridges_bbox = get_extents(all_bridges);
+        std::vector<std::pair<ExPolygon, int>> kept;
+        kept.reserve(overhang_regions_with_type->size());
+        bool any_trimmed = false;
+        for (auto &overhang_part : *overhang_regions_with_type) {
+            BoundingBox part_bbox = get_extents(overhang_part.first);
+            if (!bridges_bbox.overlap(part_bbox)) {
+                kept.emplace_back(std::move(overhang_part.first), overhang_part.second);
+                continue;
+            }
+            ExPolygons remaining = diff_ex({overhang_part.first}, all_bridges, ApplySafetyOffset::Yes);
+            any_trimmed = true;
+            for (auto &expoly : remaining)
+                kept.emplace_back(std::move(expoly), overhang_part.second);
+        }
+        if (any_trimmed)
+            *overhang_regions_with_type = std::move(kept);
+    }
 }
 
 template void PrintObject::remove_bridges_from_contacts<ExPolygons>(
@@ -3848,13 +3880,15 @@ template void PrintObject::remove_bridges_from_contacts<ExPolygons>(
     const Layer* current_layer,
     float extrusion_width,
     ExPolygons* overhang_regions,
-    float max_bridge_length, bool break_bridge);
+    float max_bridge_length, bool break_bridge,
+    std::vector<std::pair<ExPolygon, int>>* overhang_regions_with_type);
 template void PrintObject::remove_bridges_from_contacts<Polygons>(
     const Layer* lower_layer,
     const Layer* current_layer,
     float extrusion_width,
     Polygons* overhang_regions,
-    float max_bridge_length, bool break_bridge);
+    float max_bridge_length, bool break_bridge,
+    std::vector<std::pair<ExPolygon, int>>* overhang_regions_with_type);
 
 
 SupportNecessaryType PrintObject::is_support_necessary()
@@ -4062,6 +4096,7 @@ static void project_triangles_to_slabs(ConstLayerPtrsAdaptor layers, const index
 void PrintObject::project_and_append_custom_facets(
         bool seam, EnforcerBlockerType type, std::vector<Polygons>& out, std::vector<std::pair<Vec3f, Vec3f>>* vertical_points) const
 {
+    const double shrink_scale = seam ? 1. : this->support_shrinkage_scale();
     for (const ModelVolume* mv : this->model_object()->volumes)
         if (mv->is_model_part()) {
             const indexed_triangle_set custom_facets = seam
@@ -4074,8 +4109,19 @@ void PrintObject::project_and_append_custom_facets(
                         seam, out);
                 else {
                     std::vector<Polygons> projected;
+                    const size_t          vp_begin = vertical_points ? vertical_points->size() : 0;
                     // Support blockers or enforcers. Project downward facing painted areas upwards to their respective slicing plane.
                     slice_mesh_slabs(custom_facets, zs_from_layers(this->layers()), this->trafo_centered() * mv->get_matrix(), nullptr, &projected, vertical_points, [](){});
+                    if (shrink_scale != 1.) {
+                        for (Polygons &polys : projected)
+                            for (Polygon &poly : polys)
+                                poly.scale(shrink_scale);
+                        if (vertical_points)
+                            for (size_t i = vp_begin; i < vertical_points->size(); ++i) {
+                                (*vertical_points)[i].first.x()  *= float(shrink_scale);
+                                (*vertical_points)[i].first.y()  *= float(shrink_scale);
+                            }
+                    }
                     // Merge these projections with the output, layer by layer.
                     assert(! projected.empty());
                     assert(out.empty() || out.size() == projected.size());

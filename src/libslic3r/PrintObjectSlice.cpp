@@ -246,6 +246,7 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
     // If clipping is disabled, then ExPolygons produced by different volumes will never be merged, thus they will be allowed to overlap.
     // It is up to the model designer to handle these overlaps.
     const bool                                                clip_multipart_objects,
+    const bool                                                order_independent_overlap_carving,
     const std::function<void()>                              &throw_on_cancel_callback)
 {
     model_volumes_sort_by_id(model_volumes);
@@ -320,7 +321,7 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
         }
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, zs_complex.size()),
-            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects, &throw_on_cancel_callback]
+            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects, order_independent_overlap_carving, &throw_on_cancel_callback]
                 (const tbb::blocked_range<size_t> &range) {
                 float z              = zs_complex[range.begin()].second;
                 auto  it_layer_range = layer_range_first(print_object_regions.layer_ranges, z);
@@ -402,13 +403,25 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                                     temp_slices[idx_region + 1].expolygons = std::move(source);
                             } else if ((region.model_volume->is_model_part() && clip_multipart_objects) || region.model_volume->is_negative_volume()) {
                                 // Clip every non-zero region preceding it.
+                                auto bbox_volume = [](const PrintObjectRegions::BoundingBox &b) {
+                                    const auto sz = b.sizes();
+                                    return double(sz.x()) * double(sz.y()) * double(sz.z());
+                                };
+                                const bool current_is_negative = region.model_volume->is_negative_volume();
+                                const double current_vol = current_is_negative ? 0.0 : bbox_volume(*region.bbox);
                                 for (int idx_region2 = 0; idx_region2 < idx_region; ++ idx_region2)
                                     if (! temp_slices[idx_region2].expolygons.empty()) {
                                         // Skip trim_overlap for now, because it slow down the performace so much for some special cases
 #if 1
                                         if (const PrintObjectRegions::VolumeRegion& region2 = layer_range.volume_regions[idx_region2];
-                                            !region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox))
-                                            temp_slices[idx_region2].expolygons = diff_ex(temp_slices[idx_region2].expolygons, temp_slices[idx_region].expolygons);
+                                            !region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox)) {
+                                            const bool current_carves = !order_independent_overlap_carving || current_is_negative ||
+                                                current_vol <= bbox_volume(*region2.bbox);
+                                            if (current_carves)
+                                                temp_slices[idx_region2].expolygons = diff_ex(temp_slices[idx_region2].expolygons, temp_slices[idx_region].expolygons);
+                                            else
+                                                temp_slices[idx_region].expolygons = diff_ex(temp_slices[idx_region].expolygons, temp_slices[idx_region2].expolygons);
+                                        }
 #else
                                         const PrintObjectRegions::VolumeRegion& region2 = layer_range.volume_regions[idx_region2];
                                         if (!region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox))
@@ -1126,6 +1139,7 @@ void PrintObject::slice_volumes()
     std::vector<std::vector<ExPolygons>> region_slices = slices_to_regions(this->model_object()->volumes, *m_shared_regions, slice_zs,
         std::move(objSliceByVolume),
         PrintObject::clip_multipart_objects,
+        print->config().enable_order_independent_overlap_carving.value,
         throw_on_cancel_callback);
 
     for (size_t region_id = 0; region_id < region_slices.size(); ++ region_id) {
@@ -1188,6 +1202,10 @@ void PrintObject::slice_volumes()
     InterlockingGenerator::generate_embedding_wall(this);
     m_print->throw_if_canceled();
 
+    // TODO(filament-shrink): refactor — apply per role/region in perimeter & infill stages instead of baking
+    //   into posSlice geometry. Current impl scales whole region by the wall_filament's shrink, which:
+    //     (1) forces posSlice invalidation whenever wall_filament changes (see PrintObject::invalidate_state_by_config_options),
+    //     (2) ignores per-role shrink (infill/solid_infill filament may differ from wall_filament).
     // SuperSlicer: filament shrink
     for (Layer *layer : m_layers) {
         for (size_t i = 0; i < layer->region_count(); ++i) {
@@ -1383,6 +1401,33 @@ ExPolygons PrintObject::_shrink_contour_holes(double contour_delta, double hole_
     return union_ex(new_ex_polys);
 }
 
+double PrintObject::support_shrinkage_scale() const
+{
+    const Print *print = this->print();
+    if (print == nullptr || this->num_printing_regions() == 0)
+        return 1.;
+    const std::vector<double> &shrink = print->config().filament_shrink.values;
+    if (shrink.empty())
+        return 1.;
+
+    double shrink_percent = 0.;
+    bool   found          = false;
+    for (size_t i = 0; i < this->num_printing_regions(); ++i) {
+        const int filament_id = this->printing_region(i).extruder(FlowRole::frPerimeter) - 1;
+        if (filament_id < 0 || filament_id >= int(shrink.size()))
+            continue;
+        if (!found) {
+            shrink_percent = shrink[filament_id];
+            found          = true;
+        } else if (shrink[filament_id] != shrink_percent) {
+            break;
+        }
+    }
+    if (!found || shrink_percent == 0. || shrink_percent == 100.)
+        return 1.;
+    return 100. / shrink_percent; // == 1 / (shrink_percent * 0.01)
+}
+
 std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType model_volume_type) const
 {
     auto it_volume     = this->model_object()->volumes.begin();
@@ -1431,6 +1476,13 @@ std::vector<Polygons> PrintObject::slice_support_volumes(const ModelVolumeType m
                     for (size_t i = range.begin(); i < range.end(); ++ i)
                         *to_merge[i] = union_(*to_merge[i]);
             });
+        }
+
+        // Align the support-volume slices with the filament_shrink-compensated object contours.
+        if (const double shrink_scale = this->support_shrinkage_scale(); shrink_scale != 1.) {
+            for (Polygons &polys : slices)
+                for (Polygon &poly : polys)
+                    poly.scale(shrink_scale);
         }
     }
     return slices;

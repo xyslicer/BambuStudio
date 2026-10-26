@@ -24,6 +24,7 @@
 #include <cfloat>
 #include <memory>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 
@@ -84,6 +85,7 @@ public:
         m_final_purge(final_purge),
         m_layer_idx(-1),
         m_tool_change_idx(0),
+        m_sparse_layers_skipped(wipe_tower_sparse_layers_skipped(print_config)),
         m_plate_origin(plate_origin),
         m_single_extruder_multi_material(print_config.single_extruder_multi_material),
         m_enable_timelapse_print(print_config.timelapse_type.value == TimelapseType::tlSmooth),
@@ -91,6 +93,8 @@ public:
         m_is_first_print(true),
         m_print_config(&print_config)
     {
+        if (m_sparse_layers_skipped)
+            m_compacted_tower_z = compute_compacted_wipe_tower_z(tool_changes);
         // initialize with the extruder offset of master extruder id
         m_extruder_offsets.resize(print_config.filament_map.size(), print_config.extruder_offset.get_at(print_config.master_extruder_id.value - 1));
         const auto& filament_map = print_config.filament_map.values; // 1 based idx
@@ -135,7 +139,13 @@ private:
     // Current layer index.
     int                                                          m_layer_idx;
     int                                                          m_tool_change_idx;
-    double                                                       m_last_wipe_tower_print_z = 0.f;
+    // Whether the tower this integration emits is actually compacted, see wipe_tower_sparse_layers_skipped().
+    // Every compaction branch below is gated on this rather than on wipe_tower_no_sparse_layers, so that
+    // emission stays on the plain path whenever the tower was planned onto every layer anyway.
+    const bool                                                   m_sparse_layers_skipped;
+    // Print z of the compacted tower per planned layer, only filled when the tower is compacted.
+    // Shared with the clearance validator through compute_compacted_wipe_tower_z().
+    std::vector<float>                                           m_compacted_tower_z;
 
     // BBS
     Vec3d                                                        m_plate_origin;
@@ -174,6 +184,7 @@ public:
         m_last_pos_defined(false),
         m_last_extrusion_role(erNone),
         m_last_width(0.0f),
+        m_last_layer_accumulated_mass(0.0f),
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         m_last_mm3_per_mm(0.0),
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
@@ -284,6 +295,10 @@ private:
 
         bool is_open() const { return f; }
         bool is_error() const;
+        // Human-readable description of the first write/flush failure (errno-based),
+        // or an empty string if no OS-level error was recorded. Lets the caller report
+        // the real cause (e.g. "No space left on device") instead of guessing.
+        std::string get_last_error() const;
 
         void flush();
         void close();
@@ -303,10 +318,15 @@ private:
     private:
         FILE *f = nullptr;
         GCodeProcessor &m_processor;
+        // errno captured at the first failed fwrite/fflush, 0 if none.
+        int  m_write_errno = 0;
     };
     void            _do_export(Print &print, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb);
 
-    static std::vector<LayerToPrint>        		                   collect_layers_to_print(const PrintObject &object);
+    // When out_empty_layer_warning is provided, the empty-layer warning text is written there instead
+    // of being pushed to the Print step immediately, so the caller can aggregate warnings from all
+    // objects into a single notification.
+    static std::vector<LayerToPrint>        		                   collect_layers_to_print(const PrintObject &object, std::string *out_empty_layer_warning = nullptr);
     static std::vector<std::pair<coordf_t, std::vector<LayerToPrint>>> collect_layers_to_print(const Print &print);
 
     struct LayerResult {
@@ -413,6 +433,12 @@ private:
     // slow down by height
     bool slowDownByHeight(double& maxSpeed, double& maxAcc, const ExtrusionPath& path);
 
+    // limit machine acceleration calculations
+    void mass_load_limited_machine_acceleration(const PrintStatistics curr_print_statistics,
+                                                const Print          &print,
+                                                double               &y_acceleration_limit_res,
+                                                double               &accumulated_mass_res);
+
     // Extruding multiple objects with soluble / non-soluble / combined supports
     // on a multi-material printer, trying to minimize tool switches.
     // Following structures sort extrusions by the extruder ID, by an order of objects and object islands.
@@ -488,6 +514,21 @@ private:
     LiftType to_lift_type(ZHopType z_hop_types);
 
     std::string     set_extruder(unsigned int extruder_id, double print_z, bool by_object=false);
+
+    // Farthest-point timelapse: find the extrusion point farthest from camera (0,0)
+    void compute_farthest_point(const std::vector<LayerToPrint> &layers, int most_used_extruder,
+                                const std::map<std::pair<const SupportLayer *, ExtrusionRole>, unsigned int> &support_filaments);
+
+    struct TimelapseGCodeResult {
+        std::string          gcode;
+        Point                safe_pos{DefaultTimelapsePos};
+        std::optional<Point> final_pos;
+    };
+    TimelapseGCodeResult generate_timelapse_gcode(const Print &print, coordf_t print_z, int most_used_extruder,
+                                                  const std::set<size_t> *layer_object_label_ids,
+                                                  const std::vector<const PrintObject*> *printed_objects,
+                                                  bool skip_pos_pick = false);
+
     std::set<ObjectID>              m_objsWithBrim; // indicates the objs with brim
     std::set<ObjectID>              m_objSupportsWithBrim; // indicates the objs' supports with brim
     // Cache for custom seam enforcers/blockers for each layer.
@@ -512,6 +553,28 @@ private:
     AvoidCrossingPerimeters             m_avoid_crossing_perimeters;
     RetractWhenCrossingPerimeters       m_retract_when_crossing_perimeters;
     TimelapsePosPicker                  m_timelapse_pos_picker;
+
+    // Farthest-point timelapse context: pick the farthest point from camera for snapshot
+    struct FarthestPointTimelapseContext {
+        // Whether farthest-point timelapse is active for this layer
+        bool    enabled{false};
+        // The farthest extrusion point from camera (0,0) in global scaled coordinates (includes plate origin + inst.shift)
+        Point   farthest_point;
+        // farthest_point converted to mm (gcode coordinate space, includes plate origin)
+        Vec2d   farthest_gcode_pos{0, 0};
+        // Extruder index (0-based) that prints the farthest point
+        int     farthest_extruder_id{0};
+        // Whether the farthest point is printed by the photo head (most_used_extruder)
+        bool    farthest_is_photo_head{false};
+        // Whether inline timelapse gcode has already been inserted on this layer
+        bool    inserted_this_layer{false};
+        // The extruder used most on this layer, chosen as the photo head
+        int     most_used_extruder{0};
+        // Object labels for the current layer, used when inline timelapse is inserted from extrusion code.
+        std::set<size_t> layer_object_label_ids;
+    };
+    FarthestPointTimelapseContext m_farthest_point_timelapse;
+
     bool                                m_enable_loop_clipping;
     // If enabled, the G-code generator will put following comments at the ends
     // of the G-code lines: _EXTRUDE_SET_SPEED, _WIPE, _OVERHANG_FAN_START, _OVERHANG_FAN_END, _IRONING_FAN_START, _IRONING_FAN_END
@@ -541,6 +604,7 @@ private:
     float                               m_last_layer_z{ 0.0f };
     float                               m_max_layer_z{ 0.0f };
     float                               m_last_width{ 0.0f };
+    double                              m_last_layer_accumulated_mass{0.0f};
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     double                              m_last_mm3_per_mm;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
@@ -588,6 +652,8 @@ private:
     // BBS
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
+    std::vector<unsigned int> m_filament_change_sequence;
+    std::vector<unsigned int> m_nozzle_change_sequence;
     coordf_t m_nominal_z;
     double   m_sub_layer_flow_ratio = 0.0;
     double   m_sub_layer_height     = 0.0;
