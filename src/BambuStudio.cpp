@@ -2202,6 +2202,16 @@ int CLI::run(int argc, char **argv)
                             const Vec3d &instance_offset = model_instance->get_offset();
                             BOOST_LOG_TRIVIAL(info) << boost::format("instance %1% transform {%2%,%3%,%4%} at %5%:%6%")% model_object->name % instance_offset.x() % instance_offset.y() %instance_offset.z() % __FUNCTION__ % __LINE__<< std::endl;
                         }*/
+                    // The preset identity keys are dereferenced below without a null check. 3MFs
+                    // written by third-party tools can carry a stub project_settings.config that
+                    // lacks them, which used to segfault the CLI; fail with a config error instead.
+                    for (const char* key : {"printer_settings_id", "print_settings_id", "filament_settings_id", "nozzle_diameter"}) {
+                        if (!config.has(key)) {
+                            BOOST_LOG_TRIVIAL(error) << boost::format("project config in 3mf is missing required key %1%")%key;
+                            record_exit_reson(outfile_dir, CLI_CONFIG_FILE_ERROR, 0, cli_errors[CLI_CONFIG_FILE_ERROR], sliced_info);
+                            flush_and_exit(CLI_CONFIG_FILE_ERROR);
+                        }
+                    }
                     current_printer_name = config.option<ConfigOptionString>("printer_settings_id")->value;
                     current_process_name = config.option<ConfigOptionString>("print_settings_id")->value;
                     current_printer_model = config.option<ConfigOptionString>("printer_model", true)->value;
@@ -2233,6 +2243,12 @@ int CLI::run(int argc, char **argv)
 
                     BOOST_LOG_TRIVIAL(info) << boost::format("current_printer_name %1%, current_process_name %2%")%current_printer_name %current_process_name;
                     ConfigOptionStrings* option_strings = config.option<ConfigOptionStrings>("inherits_group");
+                    // inherits_group is laid out as [process, filament_1..filament_n, printer]; a
+                    // malformed one would index out of bounds below, so treat it as absent.
+                    if (option_strings && (option_strings->values.size() != current_filaments_name.size() + 2)) {
+                        BOOST_LOG_TRIVIAL(warning) << boost::format("inherits_group size %1% does not match filament count %2%, ignoring it")%option_strings->values.size() %current_filaments_name.size();
+                        option_strings = nullptr;
+                    }
                     if (option_strings) {
                         current_inherits_group = option_strings->values;
                         size_t size = current_inherits_group.size();
@@ -2287,7 +2303,10 @@ int CLI::run(int argc, char **argv)
                         old_printable_width = (int)(old_printable_area[2].x() - old_printable_area[0].x());
                         old_printable_depth = (int)(old_printable_area[2].y() - old_printable_area[0].y());
                     }
-                    old_printable_height = (int)(config.opt_float("printable_height"));
+                    // Left at 0 (= unknown, falls back to the current printer's height) when a
+                    // third-party 3mf omits it.
+                    if (config.option<ConfigOptionFloat>("printable_height"))
+                        old_printable_height = (int)(config.opt_float("printable_height"));
                     // Intersection of every extruder printable area. Its center is the region both
                     // nozzles can reach; printable_area's own center includes single-nozzle strips.
                     if (config.option<ConfigOptionPointsGroups>("extruder_printable_area") && old_printable_width > 0 && old_printable_depth > 0) {
