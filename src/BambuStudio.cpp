@@ -3328,6 +3328,15 @@ int CLI::run(int argc, char **argv)
         }*/
     }
 
+    //SLICER: machine_switch means "new printer, keep the 3mf's own process" (it is only set when
+    // the given process is not compatible with the new printer). Work that depends on the printer
+    // itself (bed size, extruder/variant count, nozzle stats) must also run when the printer
+    // changed and a new compatible process was passed -- our normal invocation.
+    bool printer_changed = machine_switch
+        || (!new_printer_system_name.empty() && !current_printer_system_name.empty()
+            && (new_printer_system_name != current_printer_system_name));
+    BOOST_LOG_TRIVIAL(info) << boost::format("machine_switch %1%, printer_changed %2%")%machine_switch %printer_changed;
+
     if (!process_compatible) {
         BOOST_LOG_TRIVIAL(error) << boost::format("process not compatible with printer.");
         record_exit_reson(outfile_dir, CLI_PROCESS_NOT_COMPATIBLE, 0, cli_errors[CLI_PROCESS_NOT_COMPATIBLE], sliced_info);
@@ -3873,7 +3882,7 @@ int CLI::run(int argc, char **argv)
             for (int i = 0; i < new_extruder_count; i++)
                 new_nozzle_volume_type[i] = (NozzleVolumeType)opt_print_nvt->values[i];
         } else {
-            if (!machine_switch && !current_nozzle_volume_type.empty())
+            if (!printer_changed && !current_nozzle_volume_type.empty())
                 new_nozzle_volume_type = current_nozzle_volume_type;
             new_nozzle_volume_type.resize(new_extruder_count, nvtStandard);
             if ((new_extruder_count > 1) || different_extruder) {
@@ -4412,7 +4421,7 @@ int CLI::run(int argc, char **argv)
 
 
     //update the object config due to extruder count change
-    if ((machine_switch) && ((current_extruder_count != new_extruder_count) || (current_print_variant_count != new_printer_variant_count)))
+    if ((printer_changed) && ((current_extruder_count != new_extruder_count) || (current_print_variant_count != new_printer_variant_count)))
     {
         //process the object params here
         size_t num_objects = m_models[0].objects.size();
@@ -4587,7 +4596,7 @@ int CLI::run(int argc, char **argv)
     }
 
     // 机型变化时要触发model change  => 原来没值或者model发生变化
-    if (!has_extruder_nozzle_stats || machine_switch) {
+    if (!has_extruder_nozzle_stats || printer_changed) {
         auto max_nozzle_count   = m_print_config.option<ConfigOptionIntsNullable>("extruder_max_nozzle_count", true)->values;
         const size_t slot_count = max_nozzle_count.size();
         std::vector<int> curr_volume_map_value(slot_count, static_cast<int>(NozzleVolumeType::nvtStandard));
@@ -4954,7 +4963,7 @@ int CLI::run(int argc, char **argv)
                 %(plate_index+1) %start.x() % start.y() % start.z() %end.x() % end.y() % end.z();
     };
 
-    auto translate_models = [machine_switch, is_bbl_3mf, translate_old, shrink_to_new_bed, old_printable_width, old_printable_depth, old_printable_height, current_printable_width, current_printable_depth, current_printable_height,
+    auto translate_models = [printer_changed, is_bbl_3mf, translate_old, shrink_to_new_bed, old_printable_width, old_printable_depth, old_printable_height, current_printable_width, current_printable_depth, current_printable_height,
         has_old_shared_center, old_shared_center_x, old_shared_center_y, has_shared_center, shared_center_x, shared_center_y, shared_printable_width, shared_printable_depth, current_exclude_area, &plate_obj_size_infos] (Slic3r::GUI::PartPlateList& plate_list, DynamicPrintConfig& print_config) {
         //BBS: translate old 3mf to correct positions
         if (translate_old) {
@@ -4973,13 +4982,13 @@ int CLI::run(int argc, char **argv)
         }
 
         //machine switch case
-        //SLICER: also when only the bed size changed. machine_switch is false whenever the
+        //SLICER: also when the printer or only the bed size changed. machine_switch is false whenever the
         // process passed on the command line is compatible with the new printer (e.g. an
         // A1 mini 3mf sliced with "0.20mm Standard @BBL A1"), even though the printer did
         // change. Without this the plate list keeps the source printer's size: models are
         // never re-centered, plate membership uses the old plate stride, and the thumbnail
         // stage filters out every volume that extends past the old bed (blank plate_1.png).
-        if (is_bbl_3mf && (machine_switch || shrink_to_new_bed > 0))
+        if (is_bbl_3mf && (printer_changed || shrink_to_new_bed > 0))
         {
             int plate_count = plate_list.get_plate_count();
             ConfigOptionFloats *wipe_x_option = nullptr, *wipe_y_option = nullptr;
