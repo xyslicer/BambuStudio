@@ -3,6 +3,7 @@
 #include <cmath>
 
 namespace Slic3r { namespace GUI {
+#ifndef SLIC3R_HEADLESS
 wxColour convert_to_wxColour(const RGBA &color)
 {
     auto     r = std::clamp((int) (color[0] * 255.f), 0, 255);
@@ -27,6 +28,7 @@ float calc_color_distance(wxColour c1, wxColour c2)
 {
     return calc_color_distance(convert_to_rgba(c1), convert_to_rgba(c2));
 }
+#endif // SLIC3R_HEADLESS
 
 float calc_color_distance(RGBA c1, RGBA c2)
 {

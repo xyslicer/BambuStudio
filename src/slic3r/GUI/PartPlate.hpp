@@ -18,10 +18,15 @@
 #include "libslic3r/PrintConfig.hpp"
 // VendorProfile::PrinterModel is a nested type, so it cannot be forward declared.
 #include "libslic3r/Preset.hpp"
+#ifndef SLIC3R_HEADLESS
 #include "GLTexture.hpp"
 #include "3DScene.hpp"
 #include "GLModel.hpp"
 #include "3DBed.hpp"
+#else
+namespace Slic3r { class GLVolume; namespace GUI { class GLTexture; class GLModel; } }
+class wxString;
+#endif
 #include "libslic3r/ParameterUtils.hpp"
 
 class GLUquadric;
@@ -121,7 +126,9 @@ private:
     bool m_wipe_tower_placed {false};
     Vec3d m_wipe_tower_last_est_size {Vec3d::Zero()}; // not serialized; size change detector
     bool  m_wipe_tower_last_wrapping {false};         // not serialized; paired with m_wipe_tower_last_est_size
+#ifndef SLIC3R_HEADLESS
     std::unique_ptr<HelioPlateResult> m_helio_result;
+#endif
     float m_slice_percent;
 
     Print *m_print; //Print reference, not own it, no need to serialize
@@ -149,11 +156,13 @@ private:
     mutable BoundingBoxf3 m_grabber_box;
     Transform3d m_grabber_trans_matrix;
 
+#ifndef SLIC3R_HEADLESS
     GLModel        m_logo_triangles;
     GLModel        m_height_limit_common;
     GLModel        m_height_limit_bottom;
     GLModel        m_height_limit_top;
     GLModel        m_plate_name_edit_icon;
+#endif
     float m_scale_factor{ 1.0f };
     GLUquadricObject* m_quadric;
     int m_hover_id;
@@ -166,9 +175,11 @@ private:
     // part plate name
     std::string          m_name;        // utf8 string
     bool                 m_name_change = false;
+#ifndef SLIC3R_HEADLESS
     GLModel              m_plate_name_icon;
     mutable unsigned int m_plate_name_vbo_id{0};
     GLTexture            m_name_texture;
+#endif
 
     void init();
     bool valid_instance(int obj_id, int instance_id) const;
@@ -669,6 +680,7 @@ class PartPlateList : public ObjectBase
     BoundingBoxf3 m_bounding_box;
     bool m_intialized;
     std::string m_logo_texture_filename;
+#ifndef SLIC3R_HEADLESS
     GLTexture m_logo_texture;
     GLTexture m_del_texture;
     GLTexture m_del_hovered_texture;
@@ -690,6 +702,7 @@ class PartPlateList : public ObjectBase
     GLTexture m_plate_name_edit_texture;
     GLTexture m_plate_name_edit_hovered_texture;
     GLTexture m_idx_textures[MAX_PLATE_COUNT];
+#endif
     // set render option
     bool render_bedtype_logo = true;
     bool render_plate_settings = true;
@@ -738,6 +751,7 @@ private:
     unsigned int                          m_unselected_plate_mats_vbo{0};
     bool                                  m_update_unselected_plate_mats_vbo{true};
     ExPolygon                             m_print_polygon;
+#ifndef SLIC3R_HEADLESS
     GLModel                               m_triangles;
     GLModel                               m_exclude_triangles;
     GLModel                               m_wrapping_detection_triangles;
@@ -753,6 +767,7 @@ private:
     GLModel                               m_plate_settings_icon;
     GLModel                               m_plate_filament_map_icon;
     GLModel                               m_plate_idx_icon;
+#endif
     float                                 m_scale_factor{1.0f};
 
 public:
@@ -830,7 +845,9 @@ public:
     };
 
     static const unsigned int MAX_PLATES_COUNT = MAX_PLATE_COUNT;
+#ifndef SLIC3R_HEADLESS
     static GLTexture bed_textures[(unsigned int)btCount];
+#endif
     static bool is_load_bedtype_textures;
     static bool is_load_cali_texture;
     static bool is_load_extruder_only_area_textures;

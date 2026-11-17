@@ -73,11 +73,14 @@ using namespace nlohmann;
 
 #include "BambuStudio.hpp"
 //BBS: add exception handler for win32
+#ifndef SLIC3R_HEADLESS
 #include <wx/stdpaths.h>
+#endif
 #ifdef WIN32
 //#include "BaseException.h"
 #endif
 #include "slic3r/GUI/PartPlate.hpp"
+#ifndef SLIC3R_HEADLESS
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -85,6 +88,17 @@ using namespace nlohmann;
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GuiColor.hpp"
 #include <GLFW/glfw3.h>
+#else
+#include "slic3r/GUI/HeadlessShims.hpp"
+#include "slic3r/GUI/GuiColor.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/BuildVolume.hpp"
+#include "libslic3r/I18N.hpp"
+#include <fcntl.h>
+#include <iterator>
+// The GUI headers used to bring this in (slic3r/Utils/json_diff.hpp).
+using namespace std;
+#endif
 
 #ifdef __WXGTK__
 #include <X11/Xlib.h>
@@ -707,10 +721,12 @@ static int decode_png_to_thumbnail(std::string png_file, ThumbnailData& thumbnai
     return 0;
 }
 
+#ifndef SLIC3R_HEADLESS
 static void glfw_callback(int error_code, const char* description)
 {
     BOOST_LOG_TRIVIAL(error) << "error_code " <<error_code <<", description: " <<description<< std::endl;
 }
+#endif
 
 const float bed3d_ax3s_default_stem_radius = 0.5f;
 const float bed3d_ax3s_default_stem_length = 25.0f;
@@ -1760,7 +1776,11 @@ int CLI::run(int argc, char **argv)
         return CLI_INVALID_PARAMS;
     }
     BOOST_LOG_TRIVIAL(info) << "finished setup params, argc="<< argc << std::endl;
+#ifndef SLIC3R_HEADLESS
     std::string temp_path = wxFileName::GetTempDir().utf8_str().data();
+#else
+    std::string temp_path = boost::filesystem::temp_directory_path().string();
+#endif
     set_temporary_dir(temp_path);
 
     m_extra_config.apply(m_config, true);
@@ -1811,7 +1831,9 @@ int CLI::run(int argc, char **argv)
     bool start_gui = m_actions.empty() && !downward_check;
     if (start_gui) {
         BOOST_LOG_TRIVIAL(info) << "no action, start gui directly" << std::endl;
+#ifndef SLIC3R_HEADLESS
         ::Label::initSysFont();
+#endif
 #ifdef SLIC3R_GUI
     /*#if !defined(_WIN32) && !defined(__APPLE__)
         // likely some linux / unix system
@@ -1883,7 +1905,9 @@ int CLI::run(int argc, char **argv)
     bool first_file = true, is_bbl_3mf = false, need_arrange = true, has_thumbnails = false, up_config_to_date = false, normative_check = true, duplicate_single_object = false, use_first_fila_as_default = false, minimum_save = false, enable_timelapse = false, has_support = false, estimate_mode = false, check_preset = false;
     bool allow_rotations = true, skip_modified_gcodes = false, avoid_extrusion_cali_region = false, skip_useless_pick = false, allow_newer_file = false, current_is_multi_extruder = false, new_is_multi_extruder = false, allow_mix_temp = false, enable_wrapping_detect = false;
     Semver file_version;
+#ifndef SLIC3R_HEADLESS
     Slic3r::GUI::Camera::ViewAngleType camera_view = Slic3r::GUI::Camera::ViewAngleType::Iso;
+#endif
     std::map<size_t, bool> orients_requirement;
     std::vector<Preset*> project_presets;
     std::vector<NozzleVolumeType> current_nozzle_volume_type, new_nozzle_volume_type;
@@ -1958,8 +1982,10 @@ int CLI::run(int argc, char **argv)
         check_preset = check_preset_option->value;
 
     ConfigOptionInt* camera_view_option = m_config.option<ConfigOptionInt>("camera_view");
+#ifndef SLIC3R_HEADLESS
     if (camera_view_option)
         camera_view = (Slic3r::GUI::Camera::ViewAngleType)(camera_view_option->value);
+#endif
 
     ConfigOptionBool* avoid_extrusion_cali_region_option = m_config.option<ConfigOptionBool>("avoid_extrusion_cali_region");
     if (avoid_extrusion_cali_region_option)
@@ -6710,10 +6736,12 @@ int CLI::run(int argc, char **argv)
     global_begin_time = global_current_time;
 
     //opengl related
+#ifndef SLIC3R_HEADLESS
     std::shared_ptr<Slic3r::GUI::OpenGLManager> p_opengl_mgr = std::make_shared<Slic3r::GUI::OpenGLManager>();
     p_opengl_mgr->set_legacy_framebuffer_enabled(false);
     std::shared_ptr<GLShaderProgram> shader = nullptr;
     GLVolumeCollection glvolume_collection;
+#endif
     bool opengl_valid = false;
     const ConfigOptionStrings* filament_color = dynamic_cast<const ConfigOptionStrings *>(m_print_config.option("filament_colour"));
     std::vector<std::string> colors;
@@ -6722,6 +6750,7 @@ int CLI::run(int argc, char **argv)
     }
     else
         colors.push_back("#FFFFFFFF");
+#ifndef SLIC3R_HEADLESS
     std::vector<std::array<float, 4>> colors_out(colors.size());
     auto init_opengl_and_colors = [&p_opengl_mgr, &colors_out, &glvolume_collection, &shader, &filament_color](Model &model, std::vector<std::string>& f_colors) -> bool {
         unsigned char rgb_color[4] = {};
@@ -6829,6 +6858,10 @@ int CLI::run(int argc, char **argv)
         BOOST_LOG_TRIVIAL(info) << boost::format("init_opengl_and_colors finished, gl_valid=%1%")%gl_valid;
         return gl_valid;
     };
+#else
+    // Thumbnails are rendered outside the headless CLI.
+    auto init_opengl_and_colors = [](Model &, std::vector<std::string> &) -> bool { return false; };
+#endif
 
     for (auto const &opt_key : m_actions) {
         if (opt_key == "help") {
@@ -7776,6 +7809,7 @@ int CLI::run(int argc, char **argv)
                                     }
                                     sliced_plate_info.triangle_count = plate_triangle_counts[index];
 
+#ifndef SLIC3R_HEADLESS
                                     auto cli_generate_thumbnails = [&partplate_list, &model, &glvolume_collection, &colors_out, &shader, &p_opengl_mgr](const ThumbnailsParams& params) -> ThumbnailsList{
                                         ThumbnailsList thumbnails;
                                         p_opengl_mgr->bind_vao();
@@ -7794,6 +7828,9 @@ int CLI::run(int argc, char **argv)
                                         p_opengl_mgr->unbind_vao();
                                         return thumbnails;
                                     };
+#else
+                                    ThumbnailsGeneratorCallback cli_generate_thumbnails = nullptr;
+#endif
 
                                     // The outfile is processed by a PlaceholderParser.
                                     //outfile = part_plate->get_tmp_gcode_path();
@@ -8312,6 +8349,7 @@ int CLI::run(int argc, char **argv)
                     glfwMakeContextCurrent(window);
             }*/
 
+#ifndef SLIC3R_HEADLESS
             //opengl manager related logic
             {
                 /*Slic3r::GUI::OpenGLManager opengl_mgr;
@@ -8547,6 +8585,7 @@ int CLI::run(int argc, char **argv)
                         p_opengl_mgr->unbind_vao();
                     }
                 }
+#endif
         }
         else {
             BOOST_LOG_TRIVIAL(info) << boost::format("use previous thumbnails, no need to regenerate");
@@ -8823,6 +8862,7 @@ int CLI::run(int argc, char **argv)
         if (!opengl_valid)
             opengl_valid = init_opengl_and_colors(m_models[0], colors);
 
+#ifndef SLIC3R_HEADLESS
         if (opengl_valid) {
             Model& model = m_models[0];
             p_opengl_mgr->bind_vao();
@@ -8862,6 +8902,7 @@ int CLI::run(int argc, char **argv)
             p_opengl_mgr->unbind_shader();
             p_opengl_mgr->unbind_vao();
         }
+#endif
     }
 
     if (plate_data_src.size() > 0)
@@ -8878,6 +8919,7 @@ int CLI::run(int argc, char **argv)
     g_cli_callback_mgr.stop();
 #endif
 
+#ifndef SLIC3R_HEADLESS
     if (opengl_valid) {
         for (Model& model : m_models) {
             model.remove_backup_path_if_exist();
@@ -8889,6 +8931,7 @@ int CLI::run(int argc, char **argv)
         //BBS: release glfw
         glfwTerminate();
     }
+#endif
     //BBS: flush logs
     BOOST_LOG_TRIVIAL(info) << "Finished" << std::endl;
     global_current_time = Slic3r::Utils::get_current_milliseconds_time_monotonic();

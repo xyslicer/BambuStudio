@@ -1,6 +1,13 @@
 #ifndef slic3r_GUI_Color_hpp_
 #define slic3r_GUI_Color_hpp_
+#ifndef SLIC3R_HEADLESS
 #include <wx/colour.h>
+#else
+#include <cassert>
+#include <string>
+#include <vector>
+class wxColour;
+#endif
 #include "libslic3r/Color.hpp"
 #include "slic3r/Utils/ColorSpaceConvert.hpp"
 
