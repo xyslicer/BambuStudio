@@ -141,6 +141,16 @@ if (WIN32)
 else ()
     add_executable(BambuStudio BambuStudio.cpp BambuStudio.hpp)
 endif ()
+if (SLIC3R_HEADLESS)
+    # The few GUI-directory sources the CLI needs; everything GUI-only in them is
+    # behind #ifndef SLIC3R_HEADLESS.
+    target_sources(BambuStudio PRIVATE
+        slic3r/GUI/PartPlate.cpp
+        slic3r/GUI/WipeTowerPlacement.cpp
+        slic3r/GUI/GuiColor.cpp
+        slic3r/GUI/Plater.cpp
+        slic3r/Utils/ColorSpaceConvert.cpp)
+endif ()
 
 # Apple clang 21 segfaults in the loop vectorizer (VPlanTransforms::narrowInterleaveGroups); see libslic3r/CMakeLists.txt.
 if (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
@@ -170,7 +180,10 @@ elseif (MSVC)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /MANIFEST:NO")
 else ()
     # Boost on Raspberry-Pi does not link to pthreads explicitly.
-    target_link_libraries(BambuStudio ${CMAKE_DL_LIBS} -lstdc++ Threads::Threads pangoft2-1.0)
+    target_link_libraries(BambuStudio ${CMAKE_DL_LIBS} -lstdc++ Threads::Threads)
+    if (NOT SLIC3R_HEADLESS)
+        target_link_libraries(BambuStudio pangoft2-1.0)
+    endif ()
 endif ()
 
 # Add the Slic3r GUI library, libcurl, OpenGL and GLU libraries.
