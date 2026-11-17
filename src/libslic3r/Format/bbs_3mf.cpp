@@ -8639,7 +8639,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                 // stores object's config data
                 for (const std::string& key : obj->config.keys()) {
-                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << obj->config.opt_serialize(key) << "\"/>\n";
+                    stream << "    <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(obj->config.opt_serialize(key)) << "\"/>\n";
                 }
 
                 stream << "    <" << METADATA_TAG << " " << MESH_STAT_FACE_COUNT << "=\"" << obj_metadata.second.object->facets_count() << "\"/>\n";
@@ -8716,7 +8716,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                             // stores volume's config data
                             for (const std::string& key : volume->config.keys()) {
-                                stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
+                                stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << xml_escape_double_quotes_attribute_value(volume->config.opt_serialize(key)) << "\"/>\n";
                             }
 
                             if (const std::optional<EmbossShape> &es = volume->emboss_shape; es.has_value()) {
