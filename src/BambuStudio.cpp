@@ -4971,7 +4971,13 @@ int CLI::run(int argc, char **argv)
         }
 
         //machine switch case
-        if (is_bbl_3mf && machine_switch)
+        //SLICER: also when only the bed size changed. machine_switch is false whenever the
+        // process passed on the command line is compatible with the new printer (e.g. an
+        // A1 mini 3mf sliced with "0.20mm Standard @BBL A1"), even though the printer did
+        // change. Without this the plate list keeps the source printer's size: models are
+        // never re-centered, plate membership uses the old plate stride, and the thumbnail
+        // stage filters out every volume that extends past the old bed (blank plate_1.png).
+        if (is_bbl_3mf && (machine_switch || shrink_to_new_bed > 0))
         {
             int plate_count = plate_list.get_plate_count();
             ConfigOptionFloats *wipe_x_option = nullptr, *wipe_y_option = nullptr;
