@@ -2406,7 +2406,9 @@ int CLI::run(int argc, char **argv)
                 TriangleMeshStats stats = obj->get_object_stl_stats();
                 sliced_info.mesh_stats.open_edges        += stats.open_edges;
                 sliced_info.mesh_stats.number_of_parts   += stats.number_of_parts;
-                sliced_info.mesh_stats.number_of_facets  += stats.number_of_facets;
+                // get_object_stl_stats() never aggregates number_of_facets (always 0),
+                // so count the model-part facets directly.
+                sliced_info.mesh_stats.number_of_facets  += static_cast<int>(obj->facets_count());
                 sliced_info.mesh_stats.volume            += stats.volume;
                 if (stats.open_edges > 0)
                     sliced_info.mesh_stats.manifold = false;
