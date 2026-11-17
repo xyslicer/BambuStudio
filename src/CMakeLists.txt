@@ -149,7 +149,13 @@ if (SLIC3R_HEADLESS)
         slic3r/GUI/WipeTowerPlacement.cpp
         slic3r/GUI/GuiColor.cpp
         slic3r/GUI/Plater.cpp
-        slic3r/Utils/ColorSpaceConvert.cpp)
+        slic3r/GUI/HeadlessShims.cpp
+        slic3r/Utils/ColorSpaceConvert.cpp
+        # libslic3r/LogSink.cpp calls into these; the GUI build gets them via libslic3r_gui.
+        slic3r/Utils/Http.cpp
+        slic3r/Utils/BBLUtil.cpp)
+    # libslic3r uses OpenSSL (MD5, AES) and curl without linking them itself.
+    target_link_libraries(BambuStudio OpenSSL::SSL OpenSSL::Crypto CURL::libcurl)
 endif ()
 
 # Apple clang 21 segfaults in the loop vectorizer (VPlanTransforms::narrowInterleaveGroups); see libslic3r/CMakeLists.txt.
