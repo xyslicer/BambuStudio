@@ -8154,6 +8154,13 @@ int CLI::run(int argc, char **argv)
         std::vector<ThumbnailData *> thumbnails, no_light_thumbnails, top_thumbnails, pick_thumbnails;
         std::vector<PlateBBoxData*> plate_bboxes;
         PlateDataPtrs plate_data_list;
+        // slicer: store_to_3mf_structure() writes first_layer_time from cali_bboxes_data, which only
+        // the GUI fills (Plater::generate_first_layer_bbox). Take it from the slice result like the GUI.
+        for (int i = 0; i < partplate_list.get_plate_count(); i++) {
+            Slic3r::GUI::PartPlate *plate = partplate_list.get_plate(i);
+            if (plate->get_slice_result() && plate->is_slice_result_valid())
+                plate->cali_bboxes_data.first_layer_time = plate->get_slice_result()->initial_layer_time;
+        }
         partplate_list.store_to_3mf_structure(plate_data_list);
 
         if (sliced_plate == -1) {
@@ -8690,6 +8697,7 @@ int CLI::run(int argc, char **argv)
             calibration_thumbnails.push_back(calibration_data);*/
 
             PlateBBoxData* plate_bbox = new PlateBBoxData();
+            plate_bbox->first_layer_time = gcode_result ? gcode_result->initial_layer_time : 0.f;
             std::vector<BBoxData>& id_bboxes = plate_bbox->bbox_objs;
             BoundingBoxf bbox_all;
             PrintSequence curr_plate_seq = part_plate->get_print_seq();
