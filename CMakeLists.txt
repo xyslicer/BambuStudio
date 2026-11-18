@@ -698,6 +698,8 @@ if(SLIC3R_STATIC)
     set(USE_BLOSC TRUE)
 endif ()
 
+# Headless CLI: OpenVDB is only used by SLA hollowing (guarded in SLA/Hollowing.cpp).
+if (NOT SLIC3R_HEADLESS)
 find_package(OpenVDB 5.0 COMPONENTS openvdb)
 if(OpenVDB_FOUND)
     slic3r_remap_configs(IlmBase::Half RelWithDebInfo Release)
@@ -706,6 +708,7 @@ else ()
     message(FATAL_ERROR "OpenVDB could not be found with the bundled find module. "
                    "You can try to specify the find module location of your "
                    "OpenVDB installation with the OPENVDB_FIND_MODULE_PATH cache variable.")
+endif ()
 endif ()
 
 
