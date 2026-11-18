@@ -6,7 +6,9 @@
 #include <vector>
 #include <string>
 #include <future>
+#ifndef SLIC3R_HEADLESS
 #include <GL/glew.h>
+#endif
 #include <boost/algorithm/string.hpp>
 #include <boost/optional.hpp>
 #include <boost/filesystem/path.hpp>
@@ -28,6 +30,7 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/ModelArrange.hpp"
+#ifndef SLIC3R_HEADLESS
 #include "slic3r/GUI/OpenGLManager.hpp"
 
 #include "I18N.hpp"
@@ -51,6 +54,16 @@
 #include "../Utils/HelioDragon.hpp"
 #include <imgui/imgui_internal.h>
 #include <wx/dcgraph.h>
+#else
+#include "libslic3r/FilamentMixer.hpp"
+#include "libslic3r/AppConfig.hpp"
+#include "libslic3r/PresetBundle.hpp"
+#include "PartPlate.hpp"
+#include "WipeTowerPlacement.hpp"
+#include "libslic3r/BuildVolume.hpp"
+#include <boost/nowide/fstream.hpp>
+#include "HeadlessShims.hpp"
+#endif
 using boost::optional;
 namespace fs = boost::filesystem;
 
@@ -152,6 +165,7 @@ std::array<float, 4> PartPlate::LINE_TOP_SEL_DARK_COLOR = { 0.298f, 0.298f, 0.33
 std::array<float, 4> PartPlate::LINE_BOTTOM_COLOR	= { 0.8f, 0.8f, 0.8f, 0.4f };
 std::array<float, 4> PartPlate::HEIGHT_LIMIT_TOP_COLOR		= { 0.6f, 0.6f, 1.0f, 1.0f };
 std::array<float, 4> PartPlate::HEIGHT_LIMIT_BOTTOM_COLOR	= { 0.4f, 0.4f, 1.0f, 1.0f };
+#ifndef SLIC3R_HEADLESS
 
 
 void PartPlate::update_render_colors()
@@ -171,6 +185,7 @@ void PartPlate::load_render_colors()
 	RenderColor::colors[RenderCol_Plate_Line_Top] = IMColor(LINE_TOP_COLOR);
 	RenderColor::colors[RenderCol_Plate_Line_Bottom] = IMColor(LINE_BOTTOM_COLOR);
 }
+#endif // SLIC3R_HEADLESS
 
 
 PartPlate::PartPlate()
@@ -212,10 +227,12 @@ void PartPlate::init()
 	m_print = nullptr;
 	// 先判断 m_plater，命令行和校准不能调用 wxGetApp()
 	const ConfigBase* printer_config = nullptr;
+#ifndef SLIC3R_HEADLESS
 	if (m_plater) {
 		if (PresetBundle* bundle = wxGetApp().preset_bundle)
 			printer_config = &bundle->printers.get_edited_preset().config;
 	}
+#endif
 	reset_default_filament_map_mode(printer_config);
 }
 
@@ -228,14 +245,17 @@ BedType PartPlate::get_bed_type(bool load_from_project) const
 		return bed_type;
 	}
 
+#ifndef SLIC3R_HEADLESS
 	if (!load_from_project || !m_plater || !wxGetApp().preset_bundle)
 		return btDefault;
 
 	DynamicConfig& proj_cfg = wxGetApp().preset_bundle->project_config;
 	if (proj_cfg.has(bed_type_key))
 		return proj_cfg.opt_enum<BedType>(bed_type_key);
+#endif
 	return btDefault;
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlate::set_bed_type(BedType bed_type)
 {
@@ -305,6 +325,7 @@ void PartPlate::set_print_seq(PrintSequence print_seq)
     else
         m_config.set_key_value(print_seq_key, new ConfigOptionEnum<PrintSequence>(print_seq));
 }
+#endif // SLIC3R_HEADLESS
 
 PrintSequence PartPlate::get_print_seq() const
 {
@@ -317,6 +338,7 @@ PrintSequence PartPlate::get_print_seq() const
 
     return PrintSequence::ByDefault;
 }
+#ifndef SLIC3R_HEADLESS
 
 PrintSequence PartPlate::get_real_print_seq(bool* plate_same_as_global) const
 {
@@ -331,6 +353,7 @@ PrintSequence PartPlate::get_real_print_seq(bool* plate_same_as_global) const
 
     return curr_plate_seq;
 }
+#endif // SLIC3R_HEADLESS
 
 std::vector<int> PartPlate::get_real_filament_maps(const DynamicConfig& g_config, bool* use_global_param) const
 {
@@ -374,6 +397,7 @@ bool PartPlate::has_spiral_mode_config() const
 	std::string key = "spiral_mode";
 	return m_config.has(key);
 }
+#ifndef SLIC3R_HEADLESS
 
 bool PartPlate::get_spiral_vase_mode() const
 {
@@ -409,6 +433,7 @@ void PartPlate::set_spiral_vase_mode(bool spiral_mode, bool as_global)
 			m_config.set_key_value(key, new ConfigOptionBool(false));
 	}
 }
+#endif // SLIC3R_HEADLESS
 
 bool PartPlate::valid_instance(int obj_id, int instance_id) const
 {
@@ -492,6 +517,7 @@ void PartPlate::calc_height_limit() {
 	}
 	//std::copy(bottom_lines.begin(), bottom_lines.end(), std::back_inserter(bottom_h_lines));
 	std::copy(top_lines.begin(), top_lines.end(), std::back_inserter(top_h_lines));
+#ifndef SLIC3R_HEADLESS
     m_height_limit_common.reset();
     if (!m_height_limit_common.init_model_from_lines(common_lines))
 		BOOST_LOG_TRIVIAL(error) << "Unable to create height limit bottom lines\n";
@@ -501,7 +527,9 @@ void PartPlate::calc_height_limit() {
     m_height_limit_top.reset();
     if (!m_height_limit_top.init_model_from_lines(top_h_lines))
 		BOOST_LOG_TRIVIAL(error) << "Unable to create height limit top lines\n";
+#endif
 }
+#ifndef SLIC3R_HEADLESS
 
 int PartPlate::get_right_icon_offset_bed(int i)
 {
@@ -1188,6 +1216,7 @@ void PartPlate::on_render_for_picking() {
 	}
     wxGetApp().unbind_shader();
 }
+#endif // SLIC3R_HEADLESS
 
 std::array<float, 4> PartPlate::picking_color_component(int idx) const
 {
@@ -1207,6 +1236,7 @@ void PartPlate::release_opengl_resource()
 
 std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 {
+#ifndef SLIC3R_HEADLESS
 	std::vector<int> plate_extruders;
     if (check_objects_empty_and_gcode3mf(plate_extruders)) {
         return plate_extruders;
@@ -1307,6 +1337,9 @@ std::vector<int> PartPlate::get_extruders(bool conside_custom_gcode) const
 	}
 
 	return plate_extruders;
+#else
+	throw Slic3r::RuntimeError("PartPlate::get_extruders() needs the GUI preset bundle");
+#endif
 }
 
 std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, DynamicPrintConfig& full_config) const
@@ -1421,15 +1454,18 @@ std::vector<int> PartPlate::get_extruders_under_cli(bool conside_custom_gcode, D
 bool PartPlate::check_objects_empty_and_gcode3mf(std::vector<int> &result) const
 {
     if (m_model->objects.empty()) {//objects is empty
+#ifndef SLIC3R_HEADLESS
         if (wxGetApp().plater() && wxGetApp().plater()->is_gcode_3mf()) { // if gcode.3mf file
             for (int i = 0; i < slice_filaments_info.size(); i++) {
                 result.push_back(slice_filaments_info[i].id + 1);
             }
         }
+#endif
         return true;
     }
     return false;
 }
+#ifndef SLIC3R_HEADLESS
 
 std::vector<int> PartPlate::get_extruders_without_support(bool conside_custom_gcode) const
 {
@@ -1777,12 +1813,14 @@ bool PartPlate::check_missing_tpu285_nozzle(const DynamicPrintConfig &config) co
     }
     return false;
 }
+#endif // SLIC3R_HEADLESS
 
 bool PartPlate::check_tpu_printable_status(const DynamicPrintConfig & config, const std::vector<int> &tpu_filaments)
 {
 	// do not limit the num of tpu filament in slicing
 	return true;
 }
+#ifndef SLIC3R_HEADLESS
 
 bool PartPlate::check_multi_filament_without_prime_tower(const DynamicPrintConfig &config)
 {
@@ -2307,6 +2345,7 @@ bool PartPlate::check_single_extruder_mixed_filament_risk(const DynamicPrintConf
 
     return false;
 }
+#endif // SLIC3R_HEADLESS
 
 /*Vec3d PartPlate::calculate_wipe_tower_size(const DynamicPrintConfig &config, const double w, const double wipe_volume, int plate_extruder_size, bool use_global_objects) const
 {
@@ -2718,8 +2757,10 @@ void PartPlate::set_pos_and_size(Vec3d& origin, int width, int depth, int height
 	m_depth = depth;
 	m_height = height;
 
+#ifndef SLIC3R_HEADLESS
 	if (with_instance_move && m_plater)
 		m_plater->mark_plate_toolbar_image_dirty();
+#endif
 
 	return;
 }
@@ -2761,6 +2802,7 @@ Vec3d PartPlate::get_topleft_origin()
 
 	return origin;
 }
+#ifndef SLIC3R_HEADLESS
 
 bool PartPlate::generate_plate_name_texture()
 {
@@ -2803,6 +2845,7 @@ bool PartPlate::generate_plate_name_texture()
     calc_vertex_for_plate_name_edit_icon(&m_name_texture, 0, m_plate_name_edit_icon);
 	return true;
 }
+#endif // SLIC3R_HEADLESS
 
 std::string remove_invisible_ascii(const std::string &name)
 {
@@ -2820,21 +2863,30 @@ void PartPlate::set_plate_name(const std::string &name)
 {
 	// compare if name equal to m_name, case sensitive
 	if (boost::equals(m_name, name)) return;
+#ifndef SLIC3R_HEADLESS
 	if (Plater::has_illegal_filename_characters(name)) {
 		if(m_plater)
 			Plater::show_illegal_characters_warning(m_plater);
 		return;
 	}
+#else
+	if (headless_has_illegal_filename_characters(name))
+		return;
+#endif
+#ifndef SLIC3R_HEADLESS
 	if (m_plater)
 		m_plater->take_snapshot("set_plate_name");
+#endif
 	m_name = remove_invisible_ascii(name);
 	m_name_change = true;
+#ifndef SLIC3R_HEADLESS
 	if (m_plater) {
 		ObjectList *obj_list = wxGetApp().obj_list();
 		if (obj_list) {
 			obj_list->GetModel()->SetCurSelectedPlateFullName(m_plate_index, m_name);
 		}
 	}
+#endif
 	if (m_print != nullptr)
 		m_print->set_plate_name(m_name);
 }
@@ -3105,8 +3157,10 @@ int PartPlate::add_instance(int obj_id, int instance_id, bool move_position, Bou
 	}
 
 	BOOST_LOG_TRIVIAL(info) << boost::format("plate %1% , m_ready_for_slice changes to %2%") % m_plate_index %m_ready_for_slice;
+#ifndef SLIC3R_HEADLESS
 	if (m_plater)
 		m_plater->mark_plate_toolbar_image_dirty();
+#endif
 	return 0;
 }
 
@@ -3299,6 +3353,7 @@ void PartPlate::update_object_index(int obj_idx_removed, int obj_idx_max)
 	instance_outside_set = temp_set;
 
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	ModelObjectPtrs obj_ptrs;
@@ -3343,6 +3398,7 @@ void PartPlate::set_vase_mode_related_object_config(int obj_id) {
 	}
 	//wxGetApp().obj_list()->update_selections();
 }
+#endif // SLIC3R_HEADLESS
 
 int PartPlate::printable_instance_size()
 {
@@ -3470,6 +3526,7 @@ void PartPlate::generate_logo_polygon(ExPolygon &logo_polygon, const BoundingBox
         }
 	}
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlate::set_logo_box_by_bed(const BoundingBoxf3& box)
 {
@@ -3485,6 +3542,7 @@ void PartPlate::set_logo_box_by_bed(const BoundingBoxf3& box)
         }
 	}
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlate::generate_exclude_polygon(ExPolygon &exclude_polygon)
 {
@@ -3591,6 +3649,7 @@ bool PartPlate::set_shape(const Pointfs& shape, const Pointfs& exclude_areas, co
 
 		calc_bounding_boxes();
 
+#ifndef SLIC3R_HEADLESS
 		if (m_plater != nullptr) { // render data, skip in CLI mode where m_plater is null
 			ExPolygon logo_poly;
 			generate_logo_polygon(logo_poly);
@@ -3611,8 +3670,11 @@ bool PartPlate::set_shape(const Pointfs& shape, const Pointfs& exclude_areas, co
 			calc_vertex_for_plate_name(m_name_texture, m_plate_name_icon);//if (generate_plate_name_texture())
 			calc_vertex_for_plate_name_edit_icon(&m_name_texture, 0, m_plate_name_edit_icon);
 		}
+#endif
 	}
+#ifndef SLIC3R_HEADLESS
 	calc_height_limit();
+#endif
 
 	release_opengl_resource();
 
@@ -3627,6 +3689,7 @@ void PartPlate::set_heat_soak_areas(const Pointfs &heat_soak_areas, Vec2d positi
 	for (const Vec2d &p : heat_soak_areas)
 		m_heat_soak_area.emplace_back(p.x() + position.x(), p.y() + position.y());
 }
+#ifndef SLIC3R_HEADLESS
 
 int PartPlate::get_heat_soak_level() const
 {
@@ -3682,6 +3745,7 @@ int PartPlate::get_heat_soak_level() const
 
 	return max_level;
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlate::update_toolpath_heat_soak_level(const GCodeProcessorResult &gcode_result)
 {
@@ -3736,11 +3800,13 @@ bool PartPlate::contains(const Vec3d& point) const
 {
 	return m_bounding_box.contains(point);
 }
+#ifndef SLIC3R_HEADLESS
 
 bool PartPlate::contains(const GLVolume& v) const
 {
 	return m_bounding_box.contains(v.bounding_box());
 }
+#endif // SLIC3R_HEADLESS
 
 bool PartPlate::contains(const BoundingBoxf3& bb) const
 {
@@ -3765,6 +3831,7 @@ bool PartPlate::intersects(const BoundingBoxf3& bb) const
 	print_volume.max(1) += Slic3r::BuildVolume::BedEpsilon;
 	return print_volume.intersects(bb);
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlate::render(bool bottom, bool only_body, bool force_background_color, HeightLimitMode mode, int hover_id, bool render_cali)
 {
@@ -3814,6 +3881,7 @@ void PartPlate::render(bool bottom, bool only_body, bool force_background_color,
          wxGetApp().unbind_shader();
     }
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlate::set_selected() {
 	m_selected = true;
@@ -3868,6 +3936,7 @@ void PartPlate::update_slice_result_valid_state(bool valid)
         // not here, to preserve results on plates that are not being resliced.
     }
 }
+#ifndef SLIC3R_HEADLESS
 
 // Helio result per-plate storage
 const HelioPlateResult* PartPlate::get_helio_result() const
@@ -3917,6 +3986,7 @@ void PartPlate::update_slice_context(BackgroundSlicingProcess & process)
 
 	return;
 }
+#endif // SLIC3R_HEADLESS
 
 // BBS: delay calc gcode path in backup dir
 std::string PartPlate::get_tmp_gcode_path()
@@ -3941,6 +4011,7 @@ std::string PartPlate::get_temp_config_3mf_path()
 	}
 	return m_temp_config_3mf_path;
 }
+#ifndef SLIC3R_HEADLESS
 
 // load gcode from file
 int PartPlate::load_gcode_from_file(const std::string& filename)
@@ -3991,6 +4062,8 @@ int PartPlate::load_gcode_from_file(const std::string& filename)
 	m_ready_for_slice = true;
 	return ret;
 }
+#ifndef SLIC3R_HEADLESS
+#endif // SLIC3R_HEADLESS
 
 int PartPlate::load_thumbnail_data(std::string filename, ThumbnailData& thumb_data)
 {
@@ -4013,6 +4086,7 @@ int PartPlate::load_thumbnail_data(std::string filename, ThumbnailData& thumb_da
 	}
 	return 0;
 }
+#endif // SLIC3R_HEADLESS
 
 int PartPlate::load_pattern_thumbnail_data(std::string filename)
 {
@@ -4249,6 +4323,7 @@ std::map<std::string, std::string> PartPlate::get_diff_plate_setting()
 	}
 	return out;
 }
+#ifndef SLIC3R_HEADLESS
 
 bool PartPlate::has_different_extruder_types()
 {
@@ -4268,6 +4343,7 @@ bool PartPlate::has_different_extruder_types()
 
     return false;
 }
+#endif // SLIC3R_HEADLESS
 
 FilamentMapMode PartPlate::get_filament_map_mode() const
 {
@@ -4276,6 +4352,7 @@ FilamentMapMode PartPlate::get_filament_map_mode() const
         return m_config.option<ConfigOptionEnum<FilamentMapMode>>(key)->value;
     return FilamentMapMode::fmmDefault;
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlate::set_filament_map_mode(const FilamentMapMode& mode)
 {
@@ -4295,6 +4372,7 @@ void PartPlate::set_filament_map_mode(const FilamentMapMode& mode)
 	else
 		m_config.option<ConfigOptionEnum<FilamentMapMode>>("filament_map_mode", true)->value = mode;
 }
+#endif // SLIC3R_HEADLESS
 
 std::vector<int> PartPlate::get_filament_maps() const
 {
@@ -4367,6 +4445,7 @@ void PartPlate::reset_default_filament_map_mode(const ConfigBase* printer_config
             : FilamentMapMode::fmmAutoForFlush;
     m_config.option<ConfigOptionEnum<FilamentMapMode>>("filament_map_mode", true)->value = default_mode;
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlate::on_extruder_count_changed(int extruder_count)
 {
@@ -4382,6 +4461,7 @@ void PartPlate::on_extruder_count_changed(int extruder_count)
         reset_default_filament_map_mode(bundle ? &bundle->printers.get_edited_preset().config : nullptr);
     }
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlate::set_filament_count(int filament_count)
 {
@@ -4400,6 +4480,7 @@ void PartPlate::set_filament_count(int filament_count)
 	}
 
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlate::on_filament_added()
 {
@@ -4423,6 +4504,7 @@ void PartPlate::on_filament_added()
 		filament_volume_map.push_back(volume_type);
 	}
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlate::on_filament_deleted(int filament_count, int filament_id)
 {
@@ -4463,7 +4545,9 @@ PartPlateList::PartPlateList(Plater* platerObj, Model* modelObj, PrinterTechnolo
 PartPlateList::~PartPlateList()
 {
 	clear(true, true);
+#ifndef SLIC3R_HEADLESS
 	release_icon_textures();
+#endif
 }
 
 void PartPlateList::init()
@@ -4541,10 +4625,12 @@ void PartPlateList::generate_print_polygon(ExPolygon &print_polygon)
         }
     };
     bool use_rect_grid = false;
+#ifndef SLIC3R_HEADLESS
     if (&wxGetApp() && wxGetApp().plater()) {
         auto pm       = wxGetApp().plater()->get_curr_printer_model();
         use_rect_grid = (pm && pm->use_rect_grid == "true") ? true : false;
     }
+#endif
     int points_count = 8;
     if (m_shape.size() == 4 && !use_rect_grid) {
         // rectangle case
@@ -4640,6 +4726,7 @@ void PartPlateList::generate_exclude_polygon(ExPolygon &exclude_polygon)
 		}
     }
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::calc_triangles(const ExPolygon &poly)
 {
@@ -4677,6 +4764,7 @@ void PartPlateList::calc_heat_soak_lines()
     if (!outer.empty() && !m_heat_soak_outer_lines.init_model_from_lines(to_lines(outer), GROUND_Z))
         BOOST_LOG_TRIVIAL(error) << "Unable to create heat soak outer lines\n";
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::apply_heat_soak_to_plates()
 {
@@ -4700,9 +4788,12 @@ void PartPlateList::set_heat_soak_areas(const Pointfs &heat_soak_areas)
 
     m_heat_soak_areas = heat_soak_areas;
     apply_heat_soak_to_plates();
+#ifndef SLIC3R_HEADLESS
     if (m_plater != nullptr)
         calc_heat_soak_lines();
+#endif
 }
+#ifndef SLIC3R_HEADLESS
 
 int PartPlateList::get_cur_plate_soak_level() const
 {
@@ -4733,6 +4824,8 @@ void PartPlateList::calc_triangles_from_polygon(const ExPolygon &poly, GLModel &
         BOOST_LOG_TRIVIAL(error) << "fail";
     }
 }
+#ifndef SLIC3R_HEADLESS
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::calc_gridlines(const ExPolygon &poly, const BoundingBox &pp_bbox)
 {
@@ -4819,6 +4912,7 @@ void PartPlateList::calc_vertex_for_icons(int index, GLModel &gl_model)
     if (!gl_model.init_model_from_poly(triangles, GROUND_Z))
 		BOOST_LOG_TRIVIAL(error) << "Unable to generate geometry buffers for icons\n";
 }
+#endif // SLIC3R_HEADLESS
 
 //compute the origin for printable plate with index i
 Vec3d PartPlateList::compute_origin(int i, int cols)
@@ -4871,6 +4965,7 @@ Vec2d PartPlateList::compute_shape_position(int index, int cols)
 
 	return pos;
 }
+#ifndef SLIC3R_HEADLESS
 
 //generate icon textures
 void PartPlateList::generate_icon_textures()
@@ -5072,6 +5167,8 @@ void PartPlateList::generate_icon_textures()
 		}
 	}
 }
+#ifndef SLIC3R_HEADLESS
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::release_icon_textures()
 {
@@ -5129,14 +5226,20 @@ void PartPlateList::release_icon_textures()
         }
     }
 }
+#endif // SLIC3R_HEADLESS
 
 Vec2d PartPlateList::get_machine_default_wipe_tower_pos() const
 {
+#ifndef SLIC3R_HEADLESS
     // Per-printer normalized default (default_wipe_tower_pos), scaled to this plate's size.
     const DynamicPrintConfig &printer_cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
     auto [x, y] = get_wipe_tower_default_pos(printer_cfg, m_plate_width, m_plate_depth);
     return Vec2d((double) x, (double) y);
+#else
+    throw Slic3r::RuntimeError("PartPlateList::get_machine_default_wipe_tower_pos() needs the GUI preset bundle");
+#endif
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx, bool init_pos, bool keep_existing)
 {
@@ -5220,6 +5323,7 @@ void PartPlateList::set_default_wipe_tower_pos_for_plate(int plate_idx, bool ini
     dynamic_cast<ConfigOptionFloats *>(proj_cfg.option("wipe_tower_x"))->set_at(&wt_x_opt, plate_idx, 0);
     dynamic_cast<ConfigOptionFloats *>(proj_cfg.option("wipe_tower_y"))->set_at(&wt_y_opt, plate_idx, 0);
 }
+#endif // SLIC3R_HEADLESS
 
 //this may be happened after machine changed
 void PartPlateList::reset_size(int width, int depth, int height, bool reload_objects, bool update_shapes)
@@ -5330,10 +5434,12 @@ void PartPlateList::reinit()
 	//re-calc the bounding boxes
 	calc_bounding_boxes();
 
+#ifndef SLIC3R_HEADLESS
     if (m_plater) {
         // In GUI mode
         set_default_wipe_tower_pos_for_plate(0, true);
     }
+#endif
 
 	return;
 }
@@ -5393,10 +5499,12 @@ int PartPlateList::create_plate(bool adjust_position)
 		update_all_plates_pos_and_size(adjust_position, false);
 		set_shapes(m_shape, m_exclude_areas, m_wrapping_exclude_areas, m_extruder_areas, m_extruder_heights, m_logo_texture_filename, m_height_to_lid, m_height_to_rod);
 
+#ifndef SLIC3R_HEADLESS
 		if (m_plater) {
 			Vec2d pos = compute_shape_position(m_current_plate, cols);
 			m_plater->set_bed_position(pos);
 		}
+#endif
 	}
 	else
 	{
@@ -5410,10 +5518,12 @@ int PartPlateList::create_plate(bool adjust_position)
 	}
 
 	// update wipe tower config
+#ifndef SLIC3R_HEADLESS
 	if (m_plater) {
 		// In GUI mode
         set_default_wipe_tower_pos_for_plate(new_index, true);
 	}
+#endif
 
 	unprintable_plate.set_index(new_index+1);
 
@@ -5421,10 +5531,12 @@ int PartPlateList::create_plate(bool adjust_position)
 	if (adjust_position)
 		construct_objects_list_for_new_plate(new_index);
 
+#ifndef SLIC3R_HEADLESS
 	if (m_plater) {
 		// In GUI mode
 		wxGetApp().obj_list()->on_plate_added(plate);
 	}
+#endif
 
 	BOOST_LOG_TRIVIAL(debug) << boost::format("created a new plate %1%") % new_index;
 	return new_index;
@@ -5465,6 +5577,7 @@ int PartPlateList::destroy_print(int print_index)
 
 	return result;
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::add_plate() {
     if (m_plater) m_plater->take_snapshot("add partplate");
@@ -5473,6 +5586,7 @@ void PartPlateList::add_plate() {
     select_plate(new_plate);
     update_plate_trans(get_plate_count());
 }
+#endif // SLIC3R_HEADLESS
 
 //delete a plate by index
 //keep its instance at origin position and add them into next plate if have
@@ -5501,6 +5615,7 @@ int PartPlateList::delete_plate(int index)
 		return -1;
 	}
 
+#ifndef SLIC3R_HEADLESS
 	if (m_plater) {
 		// In GUI mode
 		// BBS: add wipe tower logic
@@ -5515,6 +5630,7 @@ int PartPlateList::delete_plate(int index)
 		if (index < wipe_tower_y->values.size())
 			wipe_tower_y->values.erase(wipe_tower_y->values.begin() + index);
 	}
+#endif
 
 	int cols = compute_colum_count(m_plate_list.size() - 1);
 	int old_cols = compute_colum_count(m_plate_list.size());
@@ -5553,8 +5669,10 @@ int PartPlateList::delete_plate(int index)
 	else {
 		//delete the plate behind current, just need to update the position of Bed3D
 		Vec2d pos = compute_shape_position(m_current_plate, m_plate_cols);
+#ifndef SLIC3R_HEADLESS
 		if (m_plater)
 			m_plater->set_bed_position(pos);
+#endif
 	}
 
 	unprintable_plate.set_index(m_plate_list.size());
@@ -5597,6 +5715,7 @@ void PartPlateList::delete_selected_plate()
 {
 	delete_plate(m_current_plate);
 }
+#ifndef SLIC3R_HEADLESS
 
 bool PartPlateList::check_all_plate_local_bed_type(const std::vector<BedType> &cur_bed_types)
 {
@@ -5623,6 +5742,7 @@ bool PartPlateList::check_all_plate_local_bed_type(const std::vector<BedType> &c
     }
     return is_ok;
 }
+#endif // SLIC3R_HEADLESS
 
 //get a plate pointer by index
 PartPlate* PartPlateList::get_plate(int index)
@@ -5693,8 +5813,10 @@ int PartPlateList::select_plate(int index)
 
 	// BBS: erase unnecessary snapshot
 	if (get_curr_plate_index() != index && m_intialized) {
+#ifndef SLIC3R_HEADLESS
 		if (m_plater)
 			m_plater->take_snapshot("select partplate!");
+#endif
 	}
 
 	std::vector<PartPlate *>::iterator it = m_plate_list.begin();
@@ -5711,12 +5833,14 @@ int PartPlateList::select_plate(int index)
 		m_model->curr_plate_index = index;
 
 	//BBS update bed origin
+#ifndef SLIC3R_HEADLESS
 	if (m_intialized && m_plater) {
 		Vec2d pos = compute_shape_position(index, m_plate_cols);
         m_plater->set_bed_position(pos);
 		m_plater->on_plate_layout_changed();
 		//wxQueueEvent(m_plater, new SimpleEvent(EVT_GLCANVAS_PLATE_SELECT));
 	}
+#endif
 
 	return 0;
 }
@@ -5957,6 +6081,7 @@ int PartPlateList::find_instance_belongs(int obj_id, int instance_id)
 	//return -1 for not found
 	return ret;
 }
+#ifndef SLIC3R_HEADLESS
 
 //notify instance's update, need to refresh the instance in plates
 //newly added or modified
@@ -6160,6 +6285,7 @@ int PartPlateList::notify_instance_removed(int obj_id, int instance_id)
 
 	return 0;
 }
+#endif // SLIC3R_HEADLESS
 
 //add instance to special plate, need to remove from the original plate
 //called from the right-mouse menu when a instance selected
@@ -6344,6 +6470,7 @@ int PartPlateList::construct_objects_list_for_new_plate(int plate_index)
 
 	return ret;
 }
+#ifndef SLIC3R_HEADLESS
 
 std::vector<Vec2d> PartPlateList::get_plate_wrapping_detection_area()
 {
@@ -6355,6 +6482,7 @@ std::vector<Vec2d> PartPlateList::get_plate_wrapping_detection_area()
 
     return std::vector<Vec2d>();
 }
+#endif // SLIC3R_HEADLESS
 
 //compute the plate index
 int PartPlateList::compute_plate_index(arrangement::ArrangePolygon& arrange_polygon)
@@ -6673,6 +6801,7 @@ void PartPlateList::postprocess_arrange_polygon(arrangement::ArrangePolygon& arr
 
 	return;
 }
+#ifndef SLIC3R_HEADLESS
 
 /*rendering related functions*/
 void PartPlateList::render_instance(bool bottom, bool only_current, bool only_body, bool force_background_color, int hover_id, bool show_grid, bool enable_multi_instance)
@@ -6960,6 +7089,8 @@ void PartPlateList::render(bool bottom, bool only_current, bool only_body, int h
     glsafe(::glDisable(GL_BLEND));
     glsafe(::glDisable(GL_DEPTH_TEST));
 }
+#ifndef SLIC3R_HEADLESS
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::render_for_picking_pass()
 {
@@ -6969,6 +7100,7 @@ void PartPlateList::render_for_picking_pass()
 		(*it)->on_render_for_picking();
 	}
 }
+#endif // SLIC3R_HEADLESS
 
 /*int PartPlateList::select_plate_by_hover_id(int hover_id)
 {
@@ -7030,6 +7162,7 @@ void PartPlateList::calc_bounding_boxes()
 		m_bounding_box.merge((*it)->get_bounding_box(true));
 	}
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::select_plate_view()
 {
@@ -7040,6 +7173,7 @@ void PartPlateList::select_plate_view()
 	m_plater->get_camera().look_at(position, target, Vec3d::UnitY());
 	m_plater->get_camera().select_view("topfront");
 }
+#endif // SLIC3R_HEADLESS
 
 bool PartPlateList::set_shapes(const Pointfs              &shape,
                                const Pointfs              &exclude_areas,
@@ -7078,6 +7212,7 @@ bool PartPlateList::set_shapes(const Pointfs              &shape,
 	update_logo_texture_filename(texture_filename);
     update_plate_trans(get_plate_count());
 
+#ifndef SLIC3R_HEADLESS
     if (m_plater != nullptr) { // prepare render data, skip in CLI mode where m_plater is null
         ExPolygon poly;
         generate_print_polygon(poly);
@@ -7105,6 +7240,7 @@ bool PartPlateList::set_shapes(const Pointfs              &shape,
         calc_vertex_for_icons(5, m_plate_filament_map_icon);
         calc_vertex_for_number(0, false, m_plate_idx_icon);
     }
+#endif
 	return true;
 }
 
@@ -7121,6 +7257,7 @@ void PartPlateList::update_logo_texture_filename(const std::string &texture_file
         std::replace(m_logo_texture_filename.begin(), m_logo_texture_filename.end(), '\\', '/');
     }
 }
+#ifndef SLIC3R_HEADLESS
 
 /*slice related functions*/
 //update current slice context into backgroud slicing process
@@ -7135,6 +7272,7 @@ void PartPlateList::update_slice_context_to_current_plate(BackgroundSlicingProce
 
 	return;
 }
+#endif // SLIC3R_HEADLESS
 
 //return the current fff print object
 Print& PartPlateList::get_current_fff_print() const
@@ -7263,6 +7401,7 @@ void PartPlateList::get_sliced_result(std::vector<bool>& sliced_result, std::vec
 		gcode_paths[i] = m_plate_list[i]->m_tmp_gcode_path;
 	}
 }
+#ifndef SLIC3R_HEADLESS
 //rebuild data which are not serialized after de-serialize
 int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_sliced_result, std::vector<std::string>& previous_gcode_paths)
 {
@@ -7368,6 +7507,7 @@ int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_
 	}*/
 	return ret;
 }
+#endif // SLIC3R_HEADLESS
 
 //retruct plates structures after auto-arrangement
 int PartPlateList::rebuild_plates_after_arrangement(bool recycle_plates, bool except_locked, int plate_index)
@@ -7447,8 +7587,10 @@ int PartPlateList::rebuild_plates_after_arrangement(bool recycle_plates, bool ex
 	}
 #endif
 
+#ifndef SLIC3R_HEADLESS
 	if (m_plater)
 		m_plater->mark_plate_toolbar_image_dirty();
+#endif
 
 	BOOST_LOG_TRIVIAL(info) << boost::format("after rebuild, plates count %1%") % m_plate_list.size();
 	return ret;
@@ -7522,7 +7664,13 @@ int PartPlateList::store_to_3mf_structure(PlateDataPtrs& plate_data_list, bool w
 						const PrintStatistics &ps = print->print_statistics();
 						if (ps.total_weight != 0.0) {
 							CNumericLocalesSetter locales_setter;
+#ifndef SLIC3R_HEADLESS
 							plate_data_item->gcode_weight =wxString::Format("%.2f", ps.total_weight).ToStdString();
+#else
+							char weight[64];
+							snprintf(weight, sizeof(weight), "%.2f", ps.total_weight);
+							plate_data_item->gcode_weight = weight;
+#endif
 						}
 						plate_data_item->is_support_used = print->is_support_used();
 						plate_data_item->support_material_on_wipe_tower = print->support_material_on_wipe_tower();
@@ -7724,6 +7872,7 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
             gcode_result->nozzle_group_result = nullptr;
 
 
+#ifndef SLIC3R_HEADLESS
 		if (m_plater && !plate_data_list[i]->thumbnail_file.empty()) {
             BOOST_LOG_TRIVIAL(info) << boost::format("plate %1%, load thumbnail from %2%.") % (i + 1) % PathSanitizer::sanitize(plate_data_list[i]->thumbnail_file);
 			if (boost::filesystem::exists(plate_data_list[i]->thumbnail_file)) {
@@ -7763,6 +7912,7 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 				m_plate_list[index]->load_pattern_box_data(plate_data_list[i]->pattern_bbox_file);
 			}
 		}
+#endif
 
 	}
 	print();
@@ -7775,6 +7925,7 @@ int PartPlateList::load_from_3mf_structure(PlateDataPtrs& plate_data_list, int f
 
 	return ret;
 }
+#ifndef SLIC3R_HEADLESS
 
 //load gcode files
 int PartPlateList::load_gcode_files()
@@ -7803,6 +7954,7 @@ int PartPlateList::load_gcode_files()
 
 	return ret;
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::print() const
 {
@@ -7823,6 +7975,7 @@ void PartPlateList::print() const
 bool PartPlateList::is_load_bedtype_textures = false;
 bool PartPlateList::is_load_extruder_only_area_textures = false;
 bool PartPlateList::is_load_cali_texture     = false;
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::BedTextureInfo::TexturePart::update_buffer()
 {
@@ -7851,9 +8004,11 @@ void PartPlateList::BedTextureInfo::TexturePart::update_buffer()
 		BOOST_LOG_TRIVIAL(error) << "Unable to create buffer triangles\n";
 	}
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::BedTextureInfo::TexturePart::reset()
 {
+#ifndef SLIC3R_HEADLESS
     if (texture) {
         texture->reset();
         delete texture;
@@ -7862,7 +8017,9 @@ void PartPlateList::BedTextureInfo::TexturePart::reset()
         release_vbo();
         delete buffer;
     }
+#endif
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::BedTextureInfo::TexturePart::release_vbo()
 {
@@ -7871,6 +8028,7 @@ void PartPlateList::BedTextureInfo::TexturePart::release_vbo()
         vbo_id = 0;
     }
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::BedTextureInfo::reset()
 {
@@ -7927,6 +8085,7 @@ void PartPlateList::BedTextureInfo::apply_bottom_texture(
         part.update_pos(bottom_rect[0], bottom_rect[1], bottom_rect[2], bottom_rect[3]);
     }
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::init_bed_type_info(const VendorProfile::PrinterModel *printer_model, int current_extruder_count)
 {
@@ -8262,6 +8421,8 @@ void PartPlateList::load_cali_textures()
 	}
 	PartPlateList::is_load_cali_texture = true;
 }
+#ifndef SLIC3R_HEADLESS
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::on_extruder_count_changed(int extruder_count)
 {
@@ -8270,6 +8431,7 @@ void PartPlateList::on_extruder_count_changed(int extruder_count)
     }
     BOOST_LOG_TRIVIAL(info) << boost::format("extruder_count=%1%")%extruder_count;
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::set_filament_count(int filament_count)
 {
@@ -8280,6 +8442,7 @@ void PartPlateList::set_filament_count(int filament_count)
     }
     BOOST_LOG_TRIVIAL(info) << boost::format("filament_count=%1%")%filament_count;
 }
+#ifndef SLIC3R_HEADLESS
 
 void PartPlateList::on_filament_added(int filament_count)
 {
@@ -8290,6 +8453,7 @@ void PartPlateList::on_filament_added(int filament_count)
     }
     BOOST_LOG_TRIVIAL(info) << boost::format("filament_count=%1%")%filament_count;
 }
+#endif // SLIC3R_HEADLESS
 
 void PartPlateList::on_filament_deleted(int filament_count, int filament_id)
 {

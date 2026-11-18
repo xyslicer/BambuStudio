@@ -1,3 +1,4 @@
+#ifndef SLIC3R_HEADLESS
 #include "Plater.hpp"
 #include "libslic3r/PerfTrace.hpp"
 #include "DeviceCore/DevNozzleRack.h"
@@ -1601,6 +1602,15 @@ void Sidebar::priv::hide_rich_tip(wxButton* btn)
 }
 #endif
 
+#else
+// Headless CLI: only get_min_flush_volumes() is compiled from this file.
+#include "libslic3r/libslic3r.h"
+#include "libslic3r/PrintConfig.hpp"
+#include <cmath>
+#include <boost/format.hpp>
+#include <boost/log/trivial.hpp>
+namespace Slic3r { namespace GUI {
+#endif
 std::vector<int> get_min_flush_volumes(const DynamicPrintConfig &full_config, size_t nozzle_id)
 {
     std::vector<int>extra_flush_volumes;
@@ -1681,6 +1691,7 @@ std::vector<int> get_min_flush_volumes(const DynamicPrintConfig &full_config, si
     }
     return extra_flush_volumes;
 }
+#ifndef SLIC3R_HEADLESS
 
 // Sidebar / public
 
@@ -31929,3 +31940,6 @@ wxArrayString get_all_camera_view_type() {
     return all_types;
 }
 }}    // namespace Slic3r::GUI
+#else
+}} // namespace Slic3r::GUI
+#endif

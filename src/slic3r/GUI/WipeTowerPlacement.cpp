@@ -14,11 +14,16 @@
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
+#ifndef SLIC3R_HEADLESS
 #include "GUI_App.hpp"
+#endif
 #include "PartPlate.hpp"
+#ifndef SLIC3R_HEADLESS
 #include "Plater.hpp"
+#endif
 
 namespace Slic3r { namespace GUI {
+#ifndef SLIC3R_HEADLESS
 
 bool wipe_tower_optimal_pos_enabled()
 {
@@ -27,6 +32,7 @@ bool wipe_tower_optimal_pos_enabled()
         return false;
     return app_config->get("auto_optimize_wipe_tower_placement") != "false";
 }
+#endif // SLIC3R_HEADLESS
 
 double wipe_tower_side_gap(const arrangement::ArrangeParams &params)
 {
@@ -416,6 +422,7 @@ bool wipe_tower_pullback_then_avoid(float &x, float &y, const Vec2d &tower_size,
                                              forbidden, brim_width, line_width);
     return x != x0 || y != y0;
 }
+#ifndef SLIC3R_HEADLESS
 
 void try_optimal_wipe_tower_position_for_plate(PartPlate &plate, int plate_idx, Model &model,
                                                PartPlateList &plate_list,
@@ -566,6 +573,8 @@ void try_optimal_wipe_tower_position_for_plate(PartPlate &plate, int plate_idx, 
     // must not treat this plate as a first materialization and redo this placement.
     plate.set_wipe_tower_placed(true);
 }
+#ifndef SLIC3R_HEADLESS
+#endif // SLIC3R_HEADLESS
 
 void init_wipe_tower_placed_flag(PartPlate &plate)
 {
@@ -667,5 +676,6 @@ bool ensure_wipe_tower_clears_forbidden_regions(PartPlate &plate, int plate_idx,
     plate.set_wipe_tower_placed(true);
     return true;
 }
+#endif // SLIC3R_HEADLESS
 
 }} // namespace Slic3r::GUI

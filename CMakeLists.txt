@@ -41,6 +41,11 @@ endif()
 
 option(SLIC3R_STATIC 			"Compile BambuStudio with static libraries (Boost, TBB, glew)" ${SLIC3R_STATIC_INITIAL})
 option(SLIC3R_GUI    			"Compile BambuStudio with GUI components (OpenGL, wxWidgets)" 1)
+# slicer fork: CLI-only build without wxWidgets/GTK/OpenGL (thumbnails are rendered outside).
+option(SLIC3R_HEADLESS          "Compile only the command line slicer, without any GUI dependencies" 0)
+if (SLIC3R_HEADLESS)
+    set(SLIC3R_GUI OFF CACHE BOOL "" FORCE)
+endif ()
 option(SLIC3R_FHS               "Assume BambuStudio is to be installed in a FHS directory structure" 0)
 option(SLIC3R_WX_STABLE         "Build against wxWidgets stable (3.0) as oppsed to dev (3.1) on Linux" 0)
 option(SLIC3R_PROFILE 			"Compile BambuStudio with an invasive Shiny profiler" 0)
@@ -141,6 +146,9 @@ endforeach()
 
 if (SLIC3R_GUI)
     add_definitions(-DSLIC3R_GUI)
+endif ()
+if (SLIC3R_HEADLESS)
+    add_definitions(-DSLIC3R_HEADLESS)
 endif ()
 
 if(SLIC3R_DESKTOP_INTEGRATION)
@@ -281,8 +289,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(THREADS_PREFER_PTHREAD_FLAG ON)
     find_package(Threads REQUIRED)
 
+    if (NOT SLIC3R_HEADLESS)
     find_package(DBus REQUIRED)
     include_directories(${DBUS_INCLUDE_DIRS})
+    endif ()
 endif()
 
 if (CMAKE_COMPILER_IS_GNUCC OR CMAKE_COMPILER_IS_GNUXX)
@@ -612,6 +622,7 @@ endif ()
 
 find_package(PNG REQUIRED)
 
+if (NOT SLIC3R_HEADLESS)
 set(OpenGL_GL_PREFERENCE "LEGACY")
 find_package(OpenGL REQUIRED)
 
@@ -624,6 +635,7 @@ endif()
 find_package(GLEW REQUIRED)
 
 find_package(glfw3 REQUIRED)
+endif ()
 
 # Find the Cereal serialization library
 find_package(cereal REQUIRED)
@@ -686,6 +698,8 @@ if(SLIC3R_STATIC)
     set(USE_BLOSC TRUE)
 endif ()
 
+# Headless CLI: OpenVDB is only used by SLA hollowing (guarded in SLA/Hollowing.cpp).
+if (NOT SLIC3R_HEADLESS)
 find_package(OpenVDB 5.0 COMPONENTS openvdb)
 if(OpenVDB_FOUND)
     slic3r_remap_configs(IlmBase::Half RelWithDebInfo Release)
@@ -694,6 +708,7 @@ else ()
     message(FATAL_ERROR "OpenVDB could not be found with the bundled find module. "
                    "You can try to specify the find module location of your "
                    "OpenVDB installation with the OPENVDB_FIND_MODULE_PATH cache variable.")
+endif ()
 endif ()
 
 
@@ -910,12 +925,14 @@ elseif (SLIC3R_FHS)
     install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION ${SLIC3R_FHS_RESOURCES}
         PATTERN "*/udev" EXCLUDE
     )
+    if (NOT SLIC3R_HEADLESS)
     install(FILES src/platform/unix/BambuStudio.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
     foreach(SIZE 32 128 192)
         install(FILES ${SLIC3R_RESOURCES_DIR}/images/BambuStudio_${SIZE}px.png
             DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${SIZE}x${SIZE}/apps RENAME BambuStudio.png
         )
     endforeach()
+    endif ()
 elseif (CMAKE_MACOSX_BUNDLE)
     install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/BambuStudio.app/Contents/resources")
 else ()
